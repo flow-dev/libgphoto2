@@ -3155,9 +3155,12 @@ enable_liveview:
 			}
 		}
 		if(!jpgStartPtr) { /* no SOI -> no JPEG */
-			gp_context_error (context, _("Sorry, your Sony camera does not seem to return a JPEG image in LiveView mode"));
+			gp_context_error (context, _("Sorry, your Sony camera does not seem to return a JPEG image SOI marker 0xd8 in LiveView mode"));
 			return GP_ERROR;
 		}
+#if 0
+		/* SONY camera sends to the end of the jpeg dump, there is no need to search for the 0xD9 EOI marker */
+		
 		/* if SOI found, start looking for EOI marker (0xFFD9) one byte after SOI
 		   (just to be sure we will not go beyond the end of the data array) */
 		jpgEndPtr = (unsigned char*)memchr(jpgStartPtr+1, 0xff, ximage+size-jpgStartPtr-1);
@@ -3171,10 +3174,13 @@ enable_liveview:
 			}
 		}
 		if(!jpgEndPtr) { /* no EOI -> no JPEG */
-			gp_context_error (context, _("Sorry, your Sony camera does not seem to return a JPEG image in LiveView mode"));
+			gp_context_error (context, _("Sorry, your Sony camera does not seem to return a JPEG image EOI marker 0xd9 in LiveView mode"));
 			return GP_ERROR;
 		}
 		gp_file_append (file, (char*)jpgStartPtr, jpgEndPtr-jpgStartPtr);
+#endif
+		/* Get from jpgStartPtr to the end of dump size */
+		gp_file_append (file, (char*)jpgStartPtr, ximage + size - jpgStartPtr);
 		free (ximage); /* FIXME: perhaps handle the 128 byte header data too. */
 
 		gp_file_set_mime_type (file, GP_MIME_JPEG);
