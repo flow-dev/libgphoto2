@@ -164,8 +164,8 @@ get_file_func (CameraFilesystem *fs, const char *folder, const char *filename,
 {
 	Camera *camera = user_data;
 	int status = GP_OK;
-	int w, h = 0, k;
-	int i,j;
+	unsigned int w, h = 0;
+	int i,j,k;
 	int b = 0;
 	int compressed = 0;
 	unsigned char header[5] = "\xff\xff\xff\xff\x55";
@@ -192,7 +192,15 @@ get_file_func (CameraFilesystem *fs, const char *folder, const char *filename,
 	GP_DEBUG ("height is %i\n", h);
 
 	/* sanity check against bad usb devices */
-	if ((w ==0) || (w > 1024) || (h == 0) || (h > 1024)) return GP_ERROR;
+	if ((w ==0) || (w > 1024) || (h == 0) || (h > 1024)) {
+		GP_DEBUG ("width / height not within sensible range");
+		return GP_ERROR_CORRUPTED_DATA;
+	}
+
+	if (b < w*h+5) {
+		GP_DEBUG ("b is %i, while w*h+5 is %i\n", b, w*h+5);
+		return GP_ERROR_CORRUPTED_DATA;
+	}
 
 	/* Image data to be downloaded contains header and footer bytes */
 	data = malloc (b+14);
@@ -212,7 +220,7 @@ get_file_func (CameraFilesystem *fs, const char *folder, const char *filename,
 	/* Now get ready to put the data into a PPM image file. */
 	image_start=data+5;
 	if (w == 176) {
-		for (i=1; i < h; i +=4){
+		for (i=1; i < h-1; i +=4){
 			for (j=1; j< w; j ++){
 				temp=image_start[i*w+j];
 				image_start[i*w+j] = image_start[(i+1)*w+j];
@@ -231,7 +239,7 @@ get_file_func (CameraFilesystem *fs, const char *folder, const char *filename,
 
 	/* sanity check the sizes, as the ahd bayer algorithm does not like very small height / width */
 	if ((h < 72) || (w < 176)) {
-		status = GP_ERROR;
+		status = GP_ERROR_CORRUPTED_DATA;
 		goto end;
 	}
 	p_data = malloc( w*h );
@@ -239,10 +247,22 @@ get_file_func (CameraFilesystem *fs, const char *folder, const char *filename,
 		status =  GP_ERROR_NO_MEMORY;
 		goto end;
 	}
-	if (compressed)
+	if (compressed) {
+		/* compressed seems to mean half the lines */
+		if (w/2*h > b+14) {
+			free(p_data);
+			status = GP_ERROR_CORRUPTED_DATA;
+			goto end;
+		}
 		jl2005a_decompress (image_start, p_data, w, h);
-	else
+	} else {
+		if (w*h > b+14) {
+			free(p_data);
+			status = GP_ERROR_CORRUPTED_DATA;
+			goto end;
+		}
 		memcpy(p_data, image_start, w*h);
+	}
 	ppm = malloc (w * h * 3 + 256); /* room for data and header */
 	if (!ppm) {
 		free(p_data);
@@ -265,7 +285,7 @@ get_file_func (CameraFilesystem *fs, const char *folder, const char *filename,
 	gp_gamma_correct_single (gtable, ptr, w * h);
 	gp_file_set_mime_type (file, GP_MIME_PPM);
 	gp_file_set_data_and_size (file, (char *)ppm, size);
-	end:
+end:
 	free(data);
 	return status;
 }

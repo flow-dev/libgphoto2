@@ -5,7 +5,8 @@
 
 bin_SCRIPTS = gphoto2-config
 
-EXTRA_DIST = HACKING MAINTAINERS TESTERS installcheck.mk
+EXTRA_DIST = MAINTAINERS TESTERS installcheck.mk
+EXTRA_DIST += HACKING.md SECURITY.md
 
 # Note: @subdirs@ lists all the directories from AC_CONFIG_SUBDIRS()
 SUBDIRS = @subdirs@ libgphoto2 camlibs tests examples po packaging doc gphoto-m4
@@ -75,7 +76,32 @@ source-code-check:
 # Usage: make CAMLIBS="canon.la ptp2.la" install-camlibs
 
 install-camlibs:
-	cd camlibs && $(MAKE) CAMLIBS="$(CAMLIBS)" install-camlibs
+	cd camlibs && $(MAKE) $(AM_MAKEFLAGS) CAMLIBS="$(CAMLIBS)" install-camlibs
+
+
+########################################################################
+# Convenience shortcuts to update the *.po translation files in both
+# po/ subdirs at once and to reset the *.po translation files to "git
+# HEAD" in both po/ subdirs at once.
+
+PO_SUBDIRS =
+PO_SUBDIRS += libgphoto2_port/po
+PO_SUBDIRS += po
+
+# Run "git checkout *.po" in all po/ subdirs
+# which is quite useful after "make dist" to clean up "git status".
+.PHONY: git-checkout-po
+git-checkout-po:
+	set -e; cd "$(top_srcdir)" && if test -d .git; then \
+		for d in $(PO_SUBDIRS); do \
+			(cd "$$d" && git checkout *.po); \
+		done; \
+	fi
+
+# Run "make update-po" in all po/ subdirs
+.PHONY: update-po
+update-po:
+	@for d in $(PO_SUBDIRS); do (cd "$$d" && $(MAKE) $(AM_MAKEFLAGS) update-po)  || exit 1; done
 
 
 ########################################################################
@@ -94,8 +120,8 @@ if ENABLE_RPM
 
 # create RPM packages
 rpm: Makefile
-	$(MAKE) dist
-	$(MAKE) -C packaging/rpm rpm
+	$(MAKE) $(AM_MAKEFLAGS) dist
+	cd packaging/rpm && $(MAKE) $(AM_MAKEFLAGS) rpm
 	@echo "The RPM packages should now be found in packaging/rpm/RPMS"
 
 else

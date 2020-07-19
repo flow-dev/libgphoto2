@@ -30,6 +30,11 @@
 #include <gphoto2/gphoto2-result.h>
 #include "gphoto2-endian.h"
 
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+#define sleep(x)
+#define usleep(x)
+#endif
+
 #ifdef ENABLE_NLS
 #  include <libintl.h>
 #  undef _
@@ -123,8 +128,8 @@ enigma13_flash_delete_all(CameraFilesystem *fs, const char *folder, void *data,
 /*
  * This function waits camera is ready
  *
- * Status: Not sure what it realy does, but the camera replies
- * Can this be some kind of ping for keepalive, or realy a ready status ?
+ * Status: Not sure what it really does, but the camera replies
+ * Can this be some kind of ping for keepalive, or really a ready status ?
  */
 static int enigma13_wait_for_ready(Camera *camera)
 {

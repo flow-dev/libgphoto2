@@ -1,7 +1,7 @@
 /* library.c
  *
  * Copyright (C) 2001-2005 Mariusz Woloszyn <emsi@ipartners.pl>
- * Copyright (C) 2003-2019 Marcus Meissner <marcus@jet.franken.de>
+ * Copyright (C) 2003-2020 Marcus Meissner <marcus@jet.franken.de>
  * Copyright (C) 2005 Hubert Figuiere <hfiguiere@teaser.fr>
  * Copyright (C) 2009 Axel Waggershauser <awagger@web.de>
  *
@@ -75,7 +75,7 @@ static int capture_timeout = USB_TIMEOUT_CAPTURE;
 
 /* below macro makes a copy of fn without leading character ('/'),
  * removes the '/' at the end if present, and calls folder_to_handle()
- * funtion proviging as the first argument the string after the second '/'.
+ * function proviging as the first argument the string after the second '/'.
  * for example if fn is '/store_00010001/DCIM/somefolder/', the macro will
  * call folder_to_handle() with 'DCIM/somefolder' as the very first argument.
  * it's used to omit storage pseudofolder and remove trailing '/'
@@ -274,6 +274,14 @@ fixup_cached_deviceinfo (Camera *camera, PTPDeviceInfo *di) {
 		C_PTP (ptp_getdeviceinfo (params, di));
 		return GP_OK;
 	}
+
+	if (    (di->VendorExtensionID == PTP_VENDOR_MICROSOFT) &&
+		(camera->port->type == GP_PORT_USB) &&
+		(a.usb_vendor == 0x1a98)
+	) {
+		di->VendorExtensionID = PTP_VENDOR_GP_LEICA;
+	}
+
 	/* XML style Olympus E series control. internal deviceInfos is encoded in XML. */
 	if (	di->Manufacturer && !strcmp(di->Manufacturer,"OLYMPUS") &&
 		(params->device_flags & DEVICE_FLAG_OLYMPUS_XML_WRAPPED)
@@ -329,6 +337,8 @@ fixup_cached_deviceinfo (Camera *camera, PTPDeviceInfo *di) {
 			a.usb_vendor = 0x4a9;
 		if (strstr (di->Manufacturer,"Nikon"))
 			a.usb_vendor = 0x4b0;
+		if (strstr (di->Manufacturer,"FUJIFILM"))
+			a.usb_vendor = 0x4cb;
 	}
 	/* Switch the PTP vendor, so that the vendor specific sets become available. */
 	if (	(di->VendorExtensionID == PTP_VENDOR_MICROSOFT) &&
@@ -378,13 +388,14 @@ fixup_cached_deviceinfo (Camera *camera, PTPDeviceInfo *di) {
 	}
 
 	if (di->VendorExtensionID == PTP_VENDOR_FUJI) {
-		C_MEM (di->DevicePropertiesSupported = realloc(di->DevicePropertiesSupported,sizeof(di->DevicePropertiesSupported[0])*(di->DevicePropertiesSupported_len + 5)));
+		C_MEM (di->DevicePropertiesSupported = realloc(di->DevicePropertiesSupported,sizeof(di->DevicePropertiesSupported[0])*(di->DevicePropertiesSupported_len + 6)));
 		di->DevicePropertiesSupported[di->DevicePropertiesSupported_len+0] = PTP_DPC_ExposureTime;
 		di->DevicePropertiesSupported[di->DevicePropertiesSupported_len+1] = PTP_DPC_FNumber;
 		di->DevicePropertiesSupported[di->DevicePropertiesSupported_len+2] = 0xd38c;	/* PC Mode */
 		di->DevicePropertiesSupported[di->DevicePropertiesSupported_len+3] = 0xd171;	/* Focus control */
 		di->DevicePropertiesSupported[di->DevicePropertiesSupported_len+4] = 0xd21c;	/* Needed for X-T2? */
-		di->DevicePropertiesSupported_len += 5;
+		di->DevicePropertiesSupported[di->DevicePropertiesSupported_len+5] = 0xd347;	/* Focus Position */
+		di->DevicePropertiesSupported_len += 6;
 	}
 
 	/* Nikon DSLR hide its newer opcodes behind another vendor specific query,
@@ -396,8 +407,8 @@ fixup_cached_deviceinfo (Camera *camera, PTPDeviceInfo *di) {
 		/* Nikon V* and J* advertise the new Nikon stuff, but only do the generic
 		 * PTP capture. FIXME: could use flags. */
 		if (params->deviceinfo.Model && (
-			(params->deviceinfo.Model[0]=='J') ||	/* J1 - J3 currently */
-			(params->deviceinfo.Model[0]=='V') ||	/* V1 - V3 currently */
+			(params->deviceinfo.Model[0]=='J') ||
+			(params->deviceinfo.Model[0]=='V') ||
 			((params->deviceinfo.Model[0]=='S') && strlen(params->deviceinfo.Model) < 3)	/* S1 - S2 currently */
 				/* but not S7000 */
 			)
@@ -407,23 +418,33 @@ fixup_cached_deviceinfo (Camera *camera, PTPDeviceInfo *di) {
 				camera->pl->params.device_flags |= PTP_NIKON_1;
 			}
 
-			/* The 1 hides some commands from us ... */
-			if ( ptp_operation_issupported(&camera->pl->params, PTP_OC_NIKON_CheckEvent) &&
-			    !ptp_operation_issupported(&camera->pl->params, PTP_OC_NIKON_GetVendorPropCodes)
-			) {
-				C_MEM (di->OperationsSupported = realloc(di->OperationsSupported,sizeof(di->OperationsSupported[0])*(di->OperationsSupported_len + 2)));
-				di->OperationsSupported[di->OperationsSupported_len+0] = PTP_OC_NIKON_GetVendorPropCodes;
-				di->OperationsSupported_len++;
 
-				/* Nikon J5 does not advertise the PTP_OC_NIKON_InitiateCaptureRecInMedia cmd ... gnh */
-				/* logic: If we have one 0x920x command, we will probably have 0x9207 too. */
-				if (	!ptp_operation_issupported(&camera->pl->params, PTP_OC_NIKON_InitiateCaptureRecInMedia) &&
-					 ptp_operation_issupported(&camera->pl->params, PTP_OC_NIKON_StartLiveView)
+			/* filter out the older models that do not support the getvendorprop / getevent codes
+			 * J1, J2 (J3 and J5 works) see https://github.com/gphoto/libgphoto2/issues/539
+			 * V1 reported not working  see https://github.com/gphoto/gphoto2/issues/336
+			 */
+			if (	strcmp(params->deviceinfo.Model,"J1") &&
+				strcmp(params->deviceinfo.Model,"J2") &&
+				strcmp(params->deviceinfo.Model,"V1")
+			) {
+				/* The 1 hides some commands from us ... */
+				if ( ptp_operation_issupported(&camera->pl->params, PTP_OC_NIKON_GetEvent) &&
+				    !ptp_operation_issupported(&camera->pl->params, PTP_OC_NIKON_GetVendorPropCodes)
 				) {
-					di->OperationsSupported[di->OperationsSupported_len+0] = PTP_OC_NIKON_InitiateCaptureRecInMedia;
+					C_MEM (di->OperationsSupported = realloc(di->OperationsSupported,sizeof(di->OperationsSupported[0])*(di->OperationsSupported_len + 2)));
+					di->OperationsSupported[di->OperationsSupported_len+0] = PTP_OC_NIKON_GetVendorPropCodes;
 					di->OperationsSupported_len++;
+
+					/* Nikon J5 does not advertise the PTP_OC_NIKON_InitiateCaptureRecInMedia cmd ... gnh */
+					/* logic: If we have one 0x920x command, we will probably have 0x9207 too. */
+					if (	!ptp_operation_issupported(&camera->pl->params, PTP_OC_NIKON_InitiateCaptureRecInMedia) &&
+						 ptp_operation_issupported(&camera->pl->params, PTP_OC_NIKON_StartLiveView)
+					) {
+						di->OperationsSupported[di->OperationsSupported_len+0] = PTP_OC_NIKON_InitiateCaptureRecInMedia;
+						di->OperationsSupported_len++;
+					}
+					/* probably more */
 				}
-				/* probably more */
 			}
 		}
 		if (params->deviceinfo.Model && !strcmp(params->deviceinfo.Model,"COOLPIX A")) {
@@ -431,9 +452,9 @@ fixup_cached_deviceinfo (Camera *camera, PTPDeviceInfo *di) {
 			if (!ptp_operation_issupported(&camera->pl->params, PTP_OC_NIKON_GetVendorPropCodes)) {
 				C_MEM (di->OperationsSupported = realloc(di->OperationsSupported,sizeof(di->OperationsSupported[0])*(di->OperationsSupported_len + 10)));
 				di->OperationsSupported[di->OperationsSupported_len+0] = PTP_OC_NIKON_GetVendorPropCodes;
-				di->OperationsSupported[di->OperationsSupported_len+1]  = PTP_OC_NIKON_CheckEvent;
+				di->OperationsSupported[di->OperationsSupported_len+1]  = PTP_OC_NIKON_GetEvent;
 				di->OperationsSupported[di->OperationsSupported_len+2]  = PTP_OC_NIKON_AfDrive;
-				di->OperationsSupported[di->OperationsSupported_len+3]  = PTP_OC_NIKON_SetControlMode;
+				di->OperationsSupported[di->OperationsSupported_len+3]  = PTP_OC_NIKON_ChangeCameraMode;
 				di->OperationsSupported[di->OperationsSupported_len+4]  = PTP_OC_NIKON_DeviceReady;
 				di->OperationsSupported[di->OperationsSupported_len+5]  = PTP_OC_NIKON_StartLiveView;
 				di->OperationsSupported[di->OperationsSupported_len+6] = PTP_OC_NIKON_EndLiveView;
@@ -443,59 +464,58 @@ fixup_cached_deviceinfo (Camera *camera, PTPDeviceInfo *di) {
 				di->OperationsSupported_len += 10;
 			}
 		}
-		if (params->deviceinfo.Model && (strstr(params->deviceinfo.Model,"KeyMission 170")))
-		{
-			GP_LOG_D("The KeyMission 170 hides commands from us ... adding all KeyMission 360 ones");
-			/* the keymission 170 seems to hide stuff from us. Mirror what the 360 exposes */
-			C_MEM (di->OperationsSupported = realloc(di->OperationsSupported,sizeof(di->OperationsSupported[0])*(di->OperationsSupported_len + 12)));
-			di->OperationsSupported[di->OperationsSupported_len+0] = PTP_OC_NIKON_AfDrive;
-			di->OperationsSupported[di->OperationsSupported_len+1] = PTP_OC_NIKON_SetControlMode;
-			di->OperationsSupported[di->OperationsSupported_len+2] = PTP_OC_NIKON_GetLargeThumb;
-			di->OperationsSupported[di->OperationsSupported_len+3] = PTP_OC_NIKON_DeviceReady;
-			di->OperationsSupported[di->OperationsSupported_len+4] = PTP_OC_NIKON_StartLiveView;
-			di->OperationsSupported[di->OperationsSupported_len+5] = PTP_OC_NIKON_EndLiveView;
-			di->OperationsSupported[di->OperationsSupported_len+6] = PTP_OC_NIKON_GetLiveViewImg;
-			di->OperationsSupported[di->OperationsSupported_len+7] = PTP_OC_NIKON_ChangeAfArea;
-			di->OperationsSupported[di->OperationsSupported_len+8] = PTP_OC_NIKON_InitiateCaptureRecInMedia;
-			di->OperationsSupported[di->OperationsSupported_len+9] = PTP_OC_NIKON_EndMovieRec;
-			di->OperationsSupported[di->OperationsSupported_len+10] = PTP_OC_NIKON_StartMovieRecInCard;
-			di->OperationsSupported[di->OperationsSupported_len+11] = PTP_OC_InitiateCapture;
-		}
 		if (params->deviceinfo.Model && (sscanf(params->deviceinfo.Model,"D%d", &nikond)))
 		{
 			if ((nikond >= 3000) && (nikond < 3199)) {
-				GP_LOG_D("The D3xxx series hides commands from us ... adding all D3000 ones");
+				GP_LOG_D("The D3xxx series hides commands from us ... ");
+				/* Most commands we guessed do not work (anymore). One user searched for those, remove the ones we do not have.
+				 * https://github.com/gphoto/libgphoto2/issues/140
+				 */
 				if (!ptp_operation_issupported(&camera->pl->params, PTP_OC_NIKON_GetVendorPropCodes)) {
-					C_MEM (di->OperationsSupported = realloc(di->OperationsSupported,sizeof(di->OperationsSupported[0])*(di->OperationsSupported_len + 15)));
-					di->OperationsSupported[di->OperationsSupported_len+0]  = PTP_OC_NIKON_GetVendorPropCodes;
-					di->OperationsSupported[di->OperationsSupported_len+1]  = PTP_OC_NIKON_CheckEvent;
-					di->OperationsSupported[di->OperationsSupported_len+2]  = PTP_OC_NIKON_Capture;
-					di->OperationsSupported[di->OperationsSupported_len+3]  = PTP_OC_NIKON_AfDrive;
-					di->OperationsSupported[di->OperationsSupported_len+4]  = PTP_OC_NIKON_SetControlMode;
-					di->OperationsSupported[di->OperationsSupported_len+5]  = PTP_OC_NIKON_DeviceReady;
-					di->OperationsSupported[di->OperationsSupported_len+6]  = PTP_OC_NIKON_AfCaptureSDRAM;
-					di->OperationsSupported[di->OperationsSupported_len+7]  = PTP_OC_NIKON_DelImageSDRAM;
-
-					di->OperationsSupported[di->OperationsSupported_len+8]  = PTP_OC_NIKON_GetPreviewImg;
-					di->OperationsSupported[di->OperationsSupported_len+9]  = PTP_OC_NIKON_StartLiveView;
-					di->OperationsSupported[di->OperationsSupported_len+10] = PTP_OC_NIKON_EndLiveView;
-					di->OperationsSupported[di->OperationsSupported_len+11] = PTP_OC_NIKON_GetLiveViewImg;
-					di->OperationsSupported[di->OperationsSupported_len+12] = PTP_OC_NIKON_MfDrive;
-					di->OperationsSupported[di->OperationsSupported_len+13] = PTP_OC_NIKON_ChangeAfArea;
-					di->OperationsSupported[di->OperationsSupported_len+14] = PTP_OC_NIKON_AfDriveCancel;
-					/* only opcodes up to 9206 ... I think. */
-					di->OperationsSupported_len += 15;
+					C_MEM (di->OperationsSupported = realloc(di->OperationsSupported,sizeof(di->OperationsSupported[0])*(di->OperationsSupported_len + 6)));
+					di->OperationsSupported[di->OperationsSupported_len+0]  = PTP_OC_NIKON_AfDrive;
+					di->OperationsSupported[di->OperationsSupported_len+1]  = PTP_OC_NIKON_DeviceReady;
+					di->OperationsSupported[di->OperationsSupported_len+2]  = PTP_OC_NIKON_GetPreviewImg;
+					di->OperationsSupported[di->OperationsSupported_len+3] = PTP_OC_NIKON_MfDrive;
+					di->OperationsSupported[di->OperationsSupported_len+4] = PTP_OC_NIKON_ChangeAfArea;
+					di->OperationsSupported[di->OperationsSupported_len+5] = PTP_OC_NIKON_AfDriveCancel;
+					di->OperationsSupported_len += 6;
 				}
 			}
-			if ((nikond >= 3200) && (nikond < 3999)) {
+			if ((nikond >= 3200) && (nikond < 3299)) {
+				GP_LOG_D("The D3200 hides commands from us ... adding some D7100 ones");
+				if (!ptp_operation_issupported(&camera->pl->params, PTP_OC_NIKON_GetVendorPropCodes)) {
+					/* see https://github.com/gphoto/gphoto2/issues/331 and https://github.com/gphoto/gphoto2/issues/332 */
+					C_MEM (di->OperationsSupported = realloc(di->OperationsSupported,sizeof(di->OperationsSupported[0])*(di->OperationsSupported_len + 14)));
+					di->OperationsSupported[di->OperationsSupported_len+0]  = PTP_OC_NIKON_GetEvent;
+					di->OperationsSupported[di->OperationsSupported_len+1]  = PTP_OC_NIKON_InitiateCaptureRecInSdram;
+					di->OperationsSupported[di->OperationsSupported_len+2]  = PTP_OC_NIKON_AfDrive;
+					di->OperationsSupported[di->OperationsSupported_len+3]  = PTP_OC_NIKON_ChangeCameraMode;
+					di->OperationsSupported[di->OperationsSupported_len+4]  = PTP_OC_NIKON_DeviceReady;
+					di->OperationsSupported[di->OperationsSupported_len+5]  = PTP_OC_NIKON_AfCaptureSDRAM;
+					di->OperationsSupported[di->OperationsSupported_len+6]  = PTP_OC_NIKON_DelImageSDRAM;
+
+					di->OperationsSupported[di->OperationsSupported_len+7]  = PTP_OC_NIKON_GetPreviewImg;
+					di->OperationsSupported[di->OperationsSupported_len+8]  = PTP_OC_NIKON_StartLiveView;
+					di->OperationsSupported[di->OperationsSupported_len+9]  = PTP_OC_NIKON_EndLiveView;
+					di->OperationsSupported[di->OperationsSupported_len+10] = PTP_OC_NIKON_GetLiveViewImg;	/* confirmed works */
+					di->OperationsSupported[di->OperationsSupported_len+11] = PTP_OC_NIKON_ChangeAfArea;
+					di->OperationsSupported[di->OperationsSupported_len+12] = PTP_OC_NIKON_InitiateCaptureRecInMedia;	/* works to some degree */
+					di->OperationsSupported[di->OperationsSupported_len+13] = PTP_OC_NIKON_AfDriveCancel;
+					/* probably more */
+					di->OperationsSupported_len += 14;
+
+				}
+			}
+			if ((nikond >= 3300) && (nikond < 3999)) {
 				GP_LOG_D("The D3xxx series hides commands from us ... adding all D7100 ones");
 				if (!ptp_operation_issupported(&camera->pl->params, PTP_OC_NIKON_GetVendorPropCodes)) {
 					C_MEM (di->OperationsSupported = realloc(di->OperationsSupported,sizeof(di->OperationsSupported[0])*(di->OperationsSupported_len + 19)));
 					di->OperationsSupported[di->OperationsSupported_len+0]  = PTP_OC_NIKON_GetVendorPropCodes;
-					di->OperationsSupported[di->OperationsSupported_len+1]  = PTP_OC_NIKON_CheckEvent;
-					di->OperationsSupported[di->OperationsSupported_len+2]  = PTP_OC_NIKON_Capture;
+					di->OperationsSupported[di->OperationsSupported_len+1]  = PTP_OC_NIKON_GetEvent;
+					di->OperationsSupported[di->OperationsSupported_len+2]  = PTP_OC_NIKON_InitiateCaptureRecInSdram;
 					di->OperationsSupported[di->OperationsSupported_len+3]  = PTP_OC_NIKON_AfDrive;
-					di->OperationsSupported[di->OperationsSupported_len+4]  = PTP_OC_NIKON_SetControlMode;
+					di->OperationsSupported[di->OperationsSupported_len+4]  = PTP_OC_NIKON_ChangeCameraMode;
 					di->OperationsSupported[di->OperationsSupported_len+5]  = PTP_OC_NIKON_DeviceReady;
 					di->OperationsSupported[di->OperationsSupported_len+6]  = PTP_OC_NIKON_AfCaptureSDRAM;
 					di->OperationsSupported[di->OperationsSupported_len+7]  = PTP_OC_NIKON_DelImageSDRAM;
@@ -508,12 +528,12 @@ fixup_cached_deviceinfo (Camera *camera, PTPDeviceInfo *di) {
 					di->OperationsSupported[di->OperationsSupported_len+13] = PTP_OC_NIKON_ChangeAfArea;
 					di->OperationsSupported[di->OperationsSupported_len+14] = PTP_OC_NIKON_InitiateCaptureRecInMedia;
 					di->OperationsSupported[di->OperationsSupported_len+15] = PTP_OC_NIKON_AfDriveCancel;
-					di->OperationsSupported[di->OperationsSupported_len+15] = PTP_OC_NIKON_AfDriveCancel;
 					di->OperationsSupported[di->OperationsSupported_len+16] = PTP_OC_NIKON_StartMovieRecInCard;
 					di->OperationsSupported[di->OperationsSupported_len+17] = PTP_OC_NIKON_EndMovieRec;
 					di->OperationsSupported[di->OperationsSupported_len+18] = PTP_OC_NIKON_TerminateCapture;
 					/* probably more */
 					di->OperationsSupported_len += 19;
+
 				}
 			}
 		}
@@ -534,6 +554,7 @@ fixup_cached_deviceinfo (Camera *camera, PTPDeviceInfo *di) {
 				free (xprops);
 			}
 		}
+
 		/* For nikon 1 j5, they have blanked this space */
 		if (camera->pl->params.device_flags & PTP_NIKON_1) {
 			for (i=0;i<di->DevicePropertiesSupported_len;i++)
@@ -555,7 +576,7 @@ fixup_cached_deviceinfo (Camera *camera, PTPDeviceInfo *di) {
 #if 0
 		if (!ptp_operation_issupported(&camera->pl->params, 0x9207)) {
 			C_MEM (di->OperationsSupported = realloc(di->OperationsSupported,sizeof(di->OperationsSupported[0])*(di->OperationsSupported_len + 2)));
-			di->OperationsSupported[di->OperationsSupported_len+0] = PTP_OC_NIKON_Capture;
+			di->OperationsSupported[di->OperationsSupported_len+0] = PTP_OC_NIKON_InitiateCaptureRecInSdram;
 			di->OperationsSupported[di->OperationsSupported_len+1] = PTP_OC_NIKON_AfCaptureSDRAM;
 			di->OperationsSupported_len+=2;
 		}
@@ -586,7 +607,7 @@ fixup_cached_deviceinfo (Camera *camera, PTPDeviceInfo *di) {
 				case 0x1000: opcodes++; break;
 				case 0x4000: events++; break;
 				case 0x5000: propcodes++; break;
-				default: 
+				default:
 					GP_LOG_E ("ptp_sony_get_vendorpropcodes() unknown opcode %x", xprops[i]);
 					break;
 				}
@@ -607,7 +628,7 @@ fixup_cached_deviceinfo (Camera *camera, PTPDeviceInfo *di) {
 				case 0x5000:
 					di->DevicePropertiesSupported[(j++)+di->DevicePropertiesSupported_len] = xprops[i];
 					break;
-				default: 
+				default:
 					break;
 				}
 			}
@@ -616,6 +637,56 @@ fixup_cached_deviceinfo (Camera *camera, PTPDeviceInfo *di) {
 			di->OperationsSupported_len += opcodes;
 			free (xprops);
 			C_PTP (ptp_sony_sdioconnect (&camera->pl->params, 3, 0, 0));
+
+			/* remember for sony zv-1 hack */
+			params->starttime = time_now();
+		}
+		/* Sony QX */
+		if (ptp_operation_issupported(&camera->pl->params, 0x96fe)) {
+			int opcodes = 0, propcodes = 0, events = 0, j,k,l;
+			uint16_t  	*xprops;
+			unsigned int	xsize;
+
+			C_PTP (ptp_sony_qx_connect (&camera->pl->params,1, 0xda01, 0xda01));
+			C_PTP (ptp_sony_qx_connect (&camera->pl->params,1, 0xda01, 0xda01));
+
+			C_PTP (ptp_sony_qx_get_vendorpropcodes (&camera->pl->params, &xprops, &xsize));
+
+			for (i=0;i<xsize;i++) {
+				switch (xprops[i] & 0x7000) {
+				case 0x1000: opcodes++; break;
+				case 0x4000: events++; break;
+				case 0x5000: propcodes++; break;
+				default:
+					GP_LOG_E ("ptp_qx_sony_get_vendorpropcodes() unknown opcode %x", xprops[i]);
+					break;
+				}
+			}
+			C_MEM (di->DevicePropertiesSupported = realloc(di->DevicePropertiesSupported,sizeof(di->DevicePropertiesSupported[0])*(di->DevicePropertiesSupported_len + propcodes)));
+			C_MEM (di->OperationsSupported       = realloc(di->OperationsSupported,      sizeof(di->OperationsSupported[0])*(di->OperationsSupported_len + opcodes)));
+			C_MEM (di->EventsSupported           = realloc(di->EventsSupported,          sizeof(di->EventsSupported[0])*(di->EventsSupported_len + events)));
+			j = 0; k = 0; l = 0;
+			for (i=0;i<xsize;i++) {
+				GP_LOG_D ("sony code: %x", xprops[i]);
+				switch (xprops[i] & 0x7000) {
+				case 0x1000:
+					di->OperationsSupported[(k++)+di->OperationsSupported_len] = xprops[i];
+					break;
+				case 0x4000:
+					di->EventsSupported[(l++)+di->EventsSupported_len] = xprops[i];
+					break;
+				case 0x5000:
+					di->DevicePropertiesSupported[(j++)+di->DevicePropertiesSupported_len] = xprops[i];
+					break;
+				default:
+					break;
+				}
+			}
+			di->DevicePropertiesSupported_len += propcodes;
+			di->EventsSupported_len += events;
+			di->OperationsSupported_len += opcodes;
+			free (xprops);
+			C_PTP (ptp_sony_qx_connect (&camera->pl->params, 3, 0xda01, 0xda01));
 		}
 	}
 #if 0 /* Marcus: not regular ptp properties, not queryable via getdevicepropertyvalue */
@@ -649,7 +720,7 @@ nikon_wait_busy(PTPParams *params, int waitms, int timeout) {
 	do {
 		res = ptp_nikon_device_ready(params);
 		if (res != PTP_RC_DeviceBusy) {
-			if (res == 0xa201)	/* seems to mean something like "not relevant" ... will repeat forever */
+			if (res == PTP_RC_NIKON_Silent_Release_Busy)	/* seems to mean something like "not relevant" ... will repeat forever */
 				return PTP_RC_OK;
 			return res;
 		}
@@ -922,7 +993,7 @@ static struct {
 	/* Fernando Santoro <fernando.lopezjr@gmail.com> */
 	{"Sony:DSC-A100 (PTP mode)",  0x054c, 0x02c0, 0},
 	/* Sam Tseng <samtz1223@gmail.com> */
-	/* this seems not to have a seperate control mode id, see https://github.com/gphoto/libgphoto2/issues/288 */
+	/* this seems not to have a separate control mode id, see https://github.com/gphoto/libgphoto2/issues/288 */
 	{"Sony:DSC-A900 (PTP mode)",  0x054c, 0x02e7, PTP_CAP},
 	/* new id?! Reported by Ruediger Oertel. */
 	{"Sony:DSC-W200 (PTP mode)",  0x054c, 0x02f8, 0},
@@ -934,6 +1005,8 @@ static struct {
 	{"Sony:DSC-HX5V (PTP mode)",  0x054c, 0x0491, 0},
 	/* tux droid <gnutuxdroid@gmail.com> */
 	{"Sony:SLT-A55 (PTP mode)",   0x054c, 0x04a3, 0},
+	/* em33kay@gmail.com */
+	{"Sony:NEX5 (PTP mode)",      0x054c, 0x04a5, 0},
 	/* http://sourceforge.net/tracker/?func=detail&atid=358874&aid=3515558&group_id=8874 */
 	{"Sony:SLT-A35 (PTP mode)",   0x054c, 0x04a7, 0},
 	/* t.ludewig@gmail.com */
@@ -998,26 +1071,31 @@ static struct {
 	/* https://github.com/gphoto/libgphoto2/issues/190 */
 	{"Sony:Alpha-A6500",	      0x054c, 0x0784, 0},
 
-	/* hanes442@icloud.com */
-	{"Sony:DSC-RX100M5 (Control)",0x054c, 0x07a3, PTP_CAP},
-
-	/* https://github.com/gphoto/libgphoto2/issues/190 */
-	{"Sony:Alpha-A6500 (Control)",0x054c, 0x07a4, PTP_CAP|PTP_CAP_PREVIEW},
-
-	/* https://sourceforge.net/p/gphoto/support-requests/127/ */
-	{"Sony:Alpha-A5000 (Control)",0x054c, 0x07c6, PTP_CAP},
-
 	/* bertrand.chambon@free.fr */
 	{"Sony:Alpha-A68 (Control)",  0x054c, 0x079b, PTP_CAP|PTP_CAP_PREVIEW},
 
 	/* https://github.com/gphoto/libgphoto2/issues/70 */
 	{"Sony:Alpha-A6300 (Control)",0x054c, 0x079c, PTP_CAP|PTP_CAP_PREVIEW},
 
+	/* Anja Stock at SUSE */
+	{"Sony:DSC-RX10M3 (Control)",  	0x054c, 0x079d, PTP_CAP|PTP_CAP_PREVIEW},
+
 	/* Elijah Parker <mail@timelapseplus.com> */
 	{"Sony:Alpha-A99 M2 (Control)", 0x054c, 0x079e, PTP_CAP|PTP_CAP_PREVIEW},
 
-	/* Anja Stock at SUSE */
-	{"Sony:DSC-RX10M3 (Control)",  	0x054c, 0x079d, PTP_CAP|PTP_CAP_PREVIEW},
+	/* Elijah Parker <mail@timelapseplus.com> */
+	{"Sony:DSC-RX100V (Control)", 0x054c, 0x07a3, PTP_CAP},
+	/* hanes442@icloud.com */
+	{"Sony:DSC-RX100M5 (Control)",0x054c, 0x07a3, PTP_CAP},
+
+
+	/* Elijah Parker <mail@timelapseplus.com> */
+	/* https://github.com/gphoto/libgphoto2/issues/190 */
+	{"Sony:Alpha-A6500 (Control)", 0x054c, 0x07a4, PTP_CAP|PTP_CAP_PREVIEW},
+
+	/* Elijah Parker <mail@timelapseplus.com> */
+	/* https://sourceforge.net/p/gphoto/support-requests/127/ */
+	{"Sony:Alpha-A5000 (Control)", 0x054c, 0x07c6, PTP_CAP},
 
 	/* jackden@gmail.com */
 	{"Sony:DSC-RX100M6 (MTP)",  0x054c, 0x0830, 0},
@@ -1037,6 +1115,9 @@ static struct {
 	/* https://sourceforge.net/p/gphoto/feature-requests/456/ */
 	{"Sony:Alpha-A7S (MTP)",      0x054c, 0x08e2, 0},
 
+	/* David Farrier <farrier@iglou.com> */
+	{"Sony:RX100M3 (MTP)",        0x054c, 0x08e3, 0},
+
 	/* Markus Oertel */
 	{"Sony:Alpha-A5100 (MTP)",    0x054c, 0x08e7, 0},
 
@@ -1053,12 +1134,12 @@ static struct {
 	/* Nick Clarke <nick.clarke@gmail.com> */
 	{"Sony:Alpha-A77 M2 (Control)", 0x054c, 0x0953, PTP_CAP|PTP_CAP_PREVIEW},
 
+	/* http://sourceforge.net/p/gphoto/feature-requests/456/ */
+	{"Sony:Alpha-A7S (Control)",    0x054c, 0x0954, PTP_CAP|PTP_CAP_PREVIEW},
+
 	/* Markus Oertel */
 	/* Preview confirmed by Adrian Schroeter, preview might need the firmware getting updated */
 	{"Sony:Alpha-A5100 (Control)",  0x054c, 0x0957, PTP_CAP|PTP_CAP_PREVIEW},
-
-	/* http://sourceforge.net/p/gphoto/feature-requests/456/ */
-	{"Sony:Alpha-A7S (Control)",    0x054c, 0x0954, PTP_CAP|PTP_CAP_PREVIEW},
 
 	/* https://github.com/gphoto/libgphoto2/issues/343  */
 	{"Sony:Alpha-A7III (Control)",  0x054c, 0x096f, PTP_CAP|PTP_CAP_PREVIEW},
@@ -1079,7 +1160,10 @@ static struct {
 	{"Sony:DSC-RX100M4",          		0x054c, 0x0a6d, PTP_CAP|PTP_CAP_PREVIEW},
 
 	/* Andre Crone <andre@elysia.nl>, adjusted */
-	{"Sony:Alpha-A7S II (Control)",		0x054c,0x0a71, PTP_CAP},
+	{"Sony:Alpha-A7S II (Control)",		0x054c,0x0a71, PTP_CAP|PTP_CAP_PREVIEW},
+
+	/* brandonlampert@gmail.com */
+	{"Sony:DSC-QX30U",			0x054c,0x0a77, PTP_CAP_PREVIEW},
 
 	/* Demo7up <demo7up@gmail.com> */
 	{"Sony:UMC-R10C",			0x054c,0x0a79, 0},
@@ -1092,6 +1176,9 @@ static struct {
 	/* https://github.com/gphoto/libgphoto2/issues/343 */
 	{"Sony:Alpha-A7 III (MTP mode)",	0x054c,0x0c03, 0},
 
+	/* andreas@harth.org */
+	{"Sony:ZV-1", 				0x054c,0x0c1b, 0},
+
 	/* Elijah Parker, mail@timelapseplus.com */
 	{"Sony:Alpha-A9 (Control)",     	0x054c, 0x0c2a, PTP_CAP|PTP_CAP_PREVIEW},
 
@@ -1101,21 +1188,27 @@ static struct {
 	{"Sony:DSC-RX0 (PC Control)",		0x054c, 0x0c32, PTP_CAP|PTP_CAP_PREVIEW},
 
 	/* Elijah Parker, mail@timelapseplus.com */
+	/* https://github.com/gphoto/libgphoto2/issues/230 */
 	{"Sony:Alpha-A7r III (PC Control)",	0x054c, 0x0c33, PTP_CAP|PTP_CAP_PREVIEW}, /* FIXME: crosscheck */
 	{"Sony:Alpha-A7 III (PC Control)",	0x054c, 0x0c34, PTP_CAP|PTP_CAP_PREVIEW}, /* FIXME: crosscheck */
 
 	/* jackden@gmail.com */
 	{"Sony:DSC-RX100M6 (PC Control)",  	0x054c, 0x0c38, PTP_CAP|PTP_CAP_PREVIEW},
 
+	/* andreas@harth.org */
+	{"Sony:ZV-1 (PC Control)",		0x054c, 0x0c44, PTP_CAP|PTP_CAP_PREVIEW},
+
 	/* https://github.com/gphoto/libgphoto2/issues/419 */
 	{"Sony:DSC RX0 II (PC Control)",	0x054c, 0x0ca6, PTP_CAP|PTP_CAP_PREVIEW},
+	/* orbital sailor <gamerdude1080@hotmail.com> */
+	{"Sony:ILCE-6400 (PC Control)",		0x054c, 0x0caa, PTP_CAP|PTP_CAP_PREVIEW},
 	/* Mikael Ståldal <mikael@staldal.nu> */
 	{"Sony:DSC-RX100M5A (MTP)",		0x054c, 0x0cb1, 0},
 	{"Sony:DSC-RX100M5A (PC Control)",	0x054c, 0x0cb2, PTP_CAP|PTP_CAP_PREVIEW},
 
-	/* https://github.com/gphoto/libgphoto2/issues/230 */
 	/* Elijah Parker, mail@timelapseplus.com */
-	{"Sony:Alpha-A7R III (Control)", 0x054c,0x0c33, PTP_CAP|PTP_CAP_PREVIEW},
+	{"Sony:DSC-A7r IV (Control)",		0x054c, 0x0ccc, PTP_CAP|PTP_CAP_PREVIEW},
+
 
 	/* Nikon Coolpix 2500: M. Meissner, 05 Oct 2003 */
 	{"Nikon:Coolpix 2500 (PTP mode)", 0x04b0, 0x0109, 0},
@@ -1328,7 +1421,7 @@ static struct {
 	/* Mdasoh Kyaeppd at IRC */
 	{"Nikon:Coolpix S6300 (PTP mode)",0x04b0, 0x032c, PTP_CAP},
 	/* sakax <sakamotox@gmail.com> */
-	{"Nikon:Coolpix S2600 (PTP mode)",0x04b0, 0x032d, PTP_CAP},
+	{"Nikon:Coolpix S2600 (PTP mode)",0x04b0, 0x032d, PTP_CAP|PTP_NIKON_BROKEN_CAP},
 
 	/* dougvj@gmail.com */
 	{"Nikon:Coolpix L810  (PTP mode)",0x04b0, 0x032f, PTP_CAP},
@@ -1420,7 +1513,7 @@ static struct {
 	/* Matthias Blaicher <blaicher@googlemail.com> */
 	{"Nikon:DSC D3s (PTP mode)",      0x04b0, 0x0426, PTP_CAP|PTP_CAP_PREVIEW},
 	/* SWPLinux IRC reporter... does not have liveview -lowend model. */
-	{"Nikon:DSC D3100 (PTP mode)",	  0x04b0, 0x0427, PTP_CAP|PTP_CAP_PREVIEW},
+	{"Nikon:DSC D3100 (PTP mode)",	  0x04b0, 0x0427, PTP_CAP},
 	/* http://sourceforge.net/tracker/?func=detail&atid=358874&aid=3140014&group_id=8874 */
 	{"Nikon:DSC D7000 (PTP mode)",    0x04b0, 0x0428, PTP_CAP|PTP_CAP_PREVIEW},
 
@@ -1499,8 +1592,15 @@ static struct {
 
 	/* Marcus Meissner */
 	{"Nikon:Z6",                	  0x04b0, 0x0443, PTP_CAP|PTP_CAP_PREVIEW},
+
+	/* Daniel Baertschi <daniel@avisec.ch> */
+	{"Nikon:Z50",                	  0x04b0, 0x0444, PTP_CAP|PTP_CAP_PREVIEW},
+
 	/* Schreiber, Steve via Gphoto-devel */
 	{"Nikon:DSC D3500",		  0x04b0, 0x0445, PTP_CAP|PTP_CAP_PREVIEW},
+
+	/* timelapse-VIEW */
+	{"Nikon:DSC D780",		  0x04b0, 0x0446, PTP_CAP|PTP_CAP_PREVIEW},
 
 	/* http://sourceforge.net/tracker/?func=detail&aid=3536904&group_id=8874&atid=108874 */
 	{"Nikon:V1",    		  0x04b0, 0x0601, PTP_CAP|PTP_NIKON_1},
@@ -1538,6 +1638,8 @@ static struct {
 	{"Panasonic:Lumix FZ5",           0x04da, 0x2372, 0},
 #endif
 
+	/* so the GX8 reports the same USB ids as others, but has capture support. See debuglog. */
+	{"Panasonic:DMC-GX8",             0x04da, 0x2374, PTP_CAP|PTP_CAP_PREVIEW},
 	{"Panasonic:DMC-FZ20",            0x04da, 0x2374, 0},
 	{"Panasonic:DMC-FZ45",            0x04da, 0x2374, 0},
 	{"Panasonic:DMC-FZ38",            0x04da, 0x2374, 0},
@@ -2083,6 +2185,9 @@ static struct {
 	/* sparkycoladev@gmail.com */
 	{"Canon:PowerShot G7 X",		0x04a9, 0x329d, PTP_CAP|PTP_CAP_PREVIEW|PTP_DONT_CLOSE_SESSION},
 
+	/* Sascha Wolff <sascha.wolff1@gmail.com> */
+	{"Canon:PowerShot SX530 HS",		0x04a9, 0x329f, PTP_CAP|PTP_CAP_PREVIEW|PTP_DONT_CLOSE_SESSION},
+
 	/* Marcus Meissner <marcus@jet.franken.de> */
 	{"Canon:EOS M10",			0x04a9, 0x32a0, PTP_CAP|PTP_CAP_PREVIEW},
 
@@ -2158,6 +2263,9 @@ static struct {
 	/* Marcus Meissner */
 	{"Canon:Digital IXUS 185",          	0x04a9, 0x32d4, 0},
 
+	/* Slavko Kocjancic <eslavko@gmail.com> */
+	{"Canon:Digital PowerShot SX730IS",	0x04a9, 0x32d6, PTP_CAP|PTP_CAP_PREVIEW},
+
 	/* Jasem Mutlaq <mutlaqja@ikarustech.com> */
 	{"Canon:EOS 4000D",			0x04a9, 0x32d9, PTP_CAP|PTP_CAP_PREVIEW|PTPBUG_DELETE_SENDS_EVENT},
 
@@ -2169,14 +2277,26 @@ static struct {
 
 	/* https://github.com/gphoto/gphoto2/issues/247, from logfile */
 	{"Canon:EOS 1500D",          		0x04a9, 0x32e1, PTP_CAP|PTP_CAP_PREVIEW|PTP_DONT_CLOSE_SESSION},
+
+	/* from timelapse-VIEW */
+	{"Canon:EOS R2",          		0x04a9, 0x32e2, PTP_CAP|PTP_CAP_PREVIEW|PTP_DONT_CLOSE_SESSION},
+
 	/* https://github.com/gphoto/libgphoto2/issues/316 */
 	{"Canon:PowerShot SX740 HS",		0x04a9, 0x32e4, PTP_CAP|PTP_CAP_PREVIEW},
 
 	/*Marc Wetli <wetli@egoshooting.com> */
 	{"Canon:EOS M6 Mark II",		0x04a9, 0x32e7, PTP_CAP|PTP_CAP_PREVIEW},
 
+	/* id from timelapse-view */
+	{"Canon:EOS 1D X MarkIII",		0x04a9, 0x32e8, PTP_CAP|PTP_CAP_PREVIEW},
+
 	/* Roland Förg <roland.foerg@arcor.de> */
 	{"Canon:EOS 250D",			0x04a9, 0x32e9, PTP_CAP|PTP_CAP_PREVIEW},
+
+	/* Matthias <matthias@mail-s.eu> */
+	{"Canon:EOS 90D",			0x04a9, 0x32ea, PTP_CAP|PTP_CAP_PREVIEW},
+	/* https://github.com/gphoto/gphoto2/issues/347 */
+	{"Canon:PowerShot SX70 HS",		0x04a9, 0x32ee, PTP_CAP|PTP_CAP_PREVIEW},
 
 	/* Konica-Minolta PTP cameras */
 	{"Konica-Minolta:DiMAGE A2 (PTP mode)",        0x132b, 0x0001, 0},
@@ -2264,6 +2384,8 @@ static struct {
 	{"Fuji:FinePix HS30EXR",		0x04cb, 0x0271, 0},
 	/* Marcel Bonnet <marcelbonnet@gmail.com> */
 	{"Fuji:FinePix S2980",			0x04cb, 0x027d, 0},
+	/* Michael Martin <mischel88@web.de> */
+	{"Fuji:FinePix X-E1",			0x04cb, 0x0283, 0},
 	/* t.ludewig@gmail.com */
 	{"Fuji:FinePix XF1",			0x04cb, 0x0288, 0},
 	/* Steve Dahl <dahl@goshawk.com> */
@@ -2293,19 +2415,27 @@ static struct {
 	/* https://github.com/gphoto/libgphoto2/issues/283 */
 	{"Fuji:Fujifilm X100F",			0x04cb, 0x02d1, 0},
 	/* https://github.com/gphoto/libgphoto2/issues/133 */
-	{"Fuji:GFX 50 S",			0x04cb, 0x02d3, PTP_CAP},
+	{"Fuji:GFX 50 S",			0x04cb, 0x02d3, PTP_CAP|PTP_CAP_PREVIEW},
 	/* https://github.com/gphoto/libgphoto2/issues/170 */
 	{"Fuji:Fujifilm X-T20",			0x04cb, 0x02d4, 0},
 	/* Рустем Валиев <rustvt@gmail.com> */
 	{"Fuji:Fujifilm X-A5",			0x04cb, 0x02d5, 0},
+	/* Daniel Queen <dqueen510@gmail.com> */
+	/* USB Raw Converter/Backup Restore mode, firmware version 1.20 or newer */
+	{"Fuji:Fujifilm X-E3",			0x04cb, 0x02d6, PTP_CAP|PTP_CAP_PREVIEW},
 	/* https://github.com/gphoto/libgphoto2/issues/283 */
 	{"Fuji:Fujifilm X-H1",			0x04cb, 0x02d7, PTP_CAP|PTP_CAP_PREVIEW},
 	/* Seth Cohen <forwardthinking.llc@gmail.com> */
 	{"Fuji:GFX 50 R",			0x04cb, 0x02dc, PTP_CAP|PTP_CAP_PREVIEW},
 	/* Stefan Weiberg at SUSE */
 	{"Fuji:Fujifilm X-T3",			0x04cb, 0x02dd, PTP_CAP|PTP_CAP_PREVIEW},
+	/* https://github.com/gphoto/gphoto2/issues/256 */
+	{"Fuji:Fujifilm GFX100",		0x04cb, 0x02de, PTP_CAP|PTP_CAP_PREVIEW},
 	/* Bruno Filho at SUSE (currently not working with cpature, but shows variables) */
-	{"Fuji:Fujifilm X-T30",			0x04cb, 0x02e3, 0 /*PTP_CAP|PTP_CAP_PREVIEW*/},
+	/* so far looks like the low end X-T30 does not support tethering, https://www.dpreview.com/forums/thread/4451199 */
+	{"Fuji:Fujifilm X-T30",			0x04cb, 0x02e3, 0},
+	/* https://github.com/gphoto/libgphoto2/issues/505 */
+	{"Fuji:Fujifilm X-T4",			0x04cb, 0x02e6, PTP_CAP|PTP_CAP_PREVIEW},
 
 	{"Ricoh:Caplio R5 (PTP mode)",          0x05ca, 0x0110, 0},
 	{"Ricoh:Caplio GX (PTP mode)",          0x05ca, 0x0325, 0},
@@ -2345,6 +2475,8 @@ static struct {
 	{"Pentax:K70 (PTP Mode)",		0x25fb, 0x017d, 0},
 
 	{"Sanyo:VPC-C5 (PTP mode)",             0x0474, 0x0230, 0},
+	/* https://github.com/gphoto/libgphoto2/issues/497 */
+	{"Sanyo:VPC-FH1 (PTP mode)",            0x0474, 0x02e5, 0},
 
 	/* from Mike Meyer <mwm@mired.org>. Does not support MTP. */
 	{"Apple:iPhone (PTP mode)",		0x05ac, 0x1290, 0},
@@ -2389,8 +2521,14 @@ static struct {
 	/* This is a camera ... reported by TAN JIAN QI <JQTAN1@e.ntu.edu.sg */
 	{"Samsung:EK-GC100",			0x04e8,	0x6866, 0},
 
+	/* 522903503@qq.com */
+	{"Sigma:fp",				0x1003,	0xc432, 0},
+
 	/* Bernhard Wagner <me@bernhardwagner.net> */
 	{"Leica:M9",				0x1a98,	0x0002, PTP_CAP},
+
+	/* Christopher Kao <christopherkao@icloud.com> */
+	{"Leica:SL (Typ 601)",			0x1a98,	0x2041, PTP_CAP|PTP_CAP_PREVIEW},
 
 	/* https://github.com/gphoto/libgphoto2/issues/105 */
 	{"Parrot:Sequoia",			0x19cf,	0x5039, PTP_CAP},
@@ -2410,8 +2548,14 @@ static struct {
 
 	/* https://sourceforge.net/p/libmtp/feature-requests/239/ */
 	{"GoPro:HERO6 Black",			0x2672, 0x0037, 0},
+	/* Rasmus Larsson <larsson.rasmus@gmail.com> */
+	{"GoPro:HERO7 White",			0x2672, 0x0042, 0},
+	/* Marcus Meissner */
+	{"GoPro:HERO7 Silver",			0x2672, 0x0043, 0},
 	/* https://sourceforge.net/p/libmtp/feature-requests/284/ */
 	{"GoPro:HERO7 Black",			0x2672, 0x0047, 0},
+	/* https://sourceforge.net/p/libmtp/bugs/1858/ */
+	{"GoPro:HERO8 Black",			0x2672, 0x0049, 0},
 #endif
 };
 
@@ -2763,8 +2907,8 @@ camera_exit (Camera *camera, GPContext *context)
 			params->inliveview = 0;
 
 			/* get the Nikon out of control mode again */
-			if (params->controlmode && ptp_operation_issupported(params,PTP_OC_NIKON_SetControlMode)) {
-				ptp_nikon_setcontrolmode (params, 0);
+			if (params->controlmode && ptp_operation_issupported(params,PTP_OC_NIKON_ChangeCameraMode)) {
+				ptp_nikon_changecameramode (params, 0);
 				params->controlmode = 0;
 			}
 			break;
@@ -2778,6 +2922,18 @@ camera_exit (Camera *camera, GPContext *context)
 			break;
 		case PTP_VENDOR_FUJI:
 			CR (camera_unprepare_capture (camera, context));
+			break;
+		case PTP_VENDOR_GP_OLYMPUS_OMD: {
+			PTPPropertyValue propval;
+
+			propval.u16 = 0;
+			CR (ptp_setdevicepropvalue (params, 0xD052, &propval, PTP_DTC_UINT16));
+			break;
+		}
+		case PTP_VENDOR_GP_LEICA:
+			if (ptp_operation_issupported(params, PTP_OC_LEICA_LECloseSession)) {
+				C_PTP (ptp_leica_leclosesession (params));
+			}
 			break;
 		}
 
@@ -2831,7 +2987,7 @@ camera_about (Camera *camera, CameraText *text, GPContext *context)
 	   "This driver supports cameras that support PTP or PictBridge(tm), and\n"
 	   "Media Players that support the Media Transfer Protocol (MTP).\n"
 	   "\n"
-	   "Enjoy!"), 2019);
+	   "Enjoy!"), 2020);
 	return (GP_OK);
 }
 
@@ -2848,6 +3004,84 @@ add_object (Camera *camera, uint32_t handle, GPContext *context)
 
 	C_PTP (ptp_object_want (params, handle, 0, &ob));
 	return GP_OK;
+}
+
+static int
+camera_capture_stream_preview (Camera *camera, CameraFile *file, GPContext *context) {
+	PTPParams		*params = &camera->pl->params;
+	PTPPropertyValue	propval;
+	PTPStreamInfo		sinfo;
+	unsigned char		*data;
+	unsigned int		size;
+
+	C_PTP (ptp_getdevicepropvalue (params, PTP_DPC_EnabledStreams, &propval, PTP_DTC_UINT32));
+	if (!(propval.u32 & 1)) {	/* video enabled already ? */
+		propval.u32 = 1;
+		C_PTP (ptp_setdevicepropvalue (params, PTP_DPC_EnabledStreams, &propval, PTP_DTC_UINT32));
+	}
+	C_PTP (ptp_getstreaminfo (params, 1, &sinfo));
+
+	if (	(params->deviceinfo.VendorExtensionID == PTP_VENDOR_GP_LEICA) &&
+		(ptp_operation_issupported(params, PTP_OC_LEICA_LEGetStreamData))
+	) {
+		/* ptp header + header before ff d8 
+		0000  58 1c 00 00 02 00 25 90-0b 00 00 00 02 01 00 00  X.....%.........
+		0010  46 1c 00 00 00 00 3e 1c-00 00 00 00 b4 00 00 00  F.....>.........
+		0020  01 00 00 00 04 00 00 00-d4 30 00 00 02 00 00 00  .........0......
+		0030  04 00 00 00 d4 30 00 00-03 00 00 00 04 00 00 00  .....0..........
+		0040  53 06 00 00 04 00 00 00-40 00 00 00 00 00 00 00  S.......@.......
+		0050  00 00 00 00 00 00 00 00-00 00 00 00 70 17 00 00  ............p...
+		0060  a0 0f 00 00 00 00 00 00-00 00 00 00 70 17 00 00  ............p...
+		0070  a0 0f 00 00 00 00 00 00-00 00 00 00 70 17 00 00  ............p...
+		0080  a0 0f 00 00 fe ff ff ff-fe ff ff ff 05 00 00 00  ................
+		0090  04 00 00 00 00 00 00 00-06 00 00 00 10 00 00 00  ................
+		00a0  00 00 00 00 00 00 00 00-00 00 00 00 00 00 00 00  ................
+		00b0  07 00 00 00 04 00 00 00-00 00 00 00 00 00 00 00  ................
+		00c0  ff d8
+		*/
+
+		C_PTP (ptp_getdevicepropvalue (params, PTP_DPC_VideoFormat, &propval, PTP_DTC_UINT32));
+
+		C_PTP (ptp_leica_getstreamdata (params, &data, &size));
+		if (propval.u32 == 0x47504a4d) { /* MJPG */
+			unsigned char	*jpgStartPtr;
+
+			/* look for the JPEG SOI marker (0xFFD8) in data */
+			jpgStartPtr = (unsigned char*)memchr(data, 0xff, size);
+			while(jpgStartPtr && ((jpgStartPtr+1) < (data + size))) {
+				if(*(jpgStartPtr + 1) == 0xd8) { /* SOI found */
+					break;
+				} else { /* go on looking (starting at next byte) */
+					jpgStartPtr++;
+					jpgStartPtr = (unsigned char*)memchr(jpgStartPtr, 0xff, data + size - jpgStartPtr);
+				}
+			}
+			if(!jpgStartPtr) { /* no SOI -> no JPEG */
+				gp_context_error (context, _("Sorry, your Nikon camera does not seem to return a JPEG image in LiveView mode"));
+				return GP_ERROR;
+			}
+
+			/* assume ff d9 is at the end for now */
+			gp_file_append (file, (char*)jpgStartPtr, size - (jpgStartPtr - data));
+			gp_file_set_mime_type (file, GP_MIME_JPEG);
+			gp_file_set_name (file, "preview.jpg");
+		} else {
+			gp_file_append (file, (char*)data, size);
+		}
+		gp_file_set_mtime (file, time(NULL));
+		free (data);
+		SET_CONTEXT_P(params, NULL);
+		return GP_OK;
+	}
+	if (ptp_operation_issupported(params, PTP_OC_GetStream)) {
+		C_PTP (ptp_getstream (params, &data, &size));
+		gp_file_append (file, (char*)data, size);
+		free (data);
+		SET_CONTEXT_P(params, NULL);
+		return GP_OK;
+	}
+	SET_CONTEXT_P(params, NULL);
+	return GP_ERROR_NOT_SUPPORTED;
 }
 
 static int
@@ -2890,7 +3124,6 @@ camera_capture_preview (Camera *camera, CameraFile *file, GPContext *context)
 			 * enough (would be 0.2 seconds, too short for the mirror up operation.). */
 			/* The EOS 100D takes 1.2 seconds */
 			PTPDevicePropDesc       dpd;
-			int			back_off_wait = 0;
 			struct timeval		event_start;
 
 			SET_CONTEXT_P(params, context);
@@ -2912,7 +3145,9 @@ camera_capture_preview (Camera *camera, CameraFile *file, GPContext *context)
 			ptp_free_devicepropdesc (&dpd);
 			/* do not set it everytime, it will cause delays */
 			ret = ptp_canon_eos_getdevicepropdesc (params, PTP_DPC_CANON_EOS_EVFOutputDevice, &dpd);
-			if ((ret == PTP_RC_OK) && (dpd.CurrentValue.u32 != 2)) {
+			/* see config.c what kind of values we have ... it seems to be a mask. bit 0 is TFT, bit 1 PC, bit 2 MOBILE, bit 3 MOBILE2? */
+			/* so lets see it only if it does not have any bit set (discounted bit 0) */
+			if ((ret == PTP_RC_OK) && ((dpd.CurrentValue.u32 & ~1) == 0)) {
 				/* 2 means PC, 1 means TFT */
 				val.u32 = 2;
 				C_PTP_MSG (ptp_canon_eos_setdevicepropvalue (params, PTP_DPC_CANON_EOS_EVFOutputDevice, &val, PTP_DTC_UINT32),
@@ -2927,6 +3162,7 @@ camera_capture_preview (Camera *camera, CameraFile *file, GPContext *context)
 			event_start = time_now();
 			do {
 				unsigned char	*xdata;
+
 				/* Poll for camera events, but just call
 				 * it once and do not drain the queue now */
 				C_PTP (ptp_check_eos_events (params));
@@ -2934,7 +3170,9 @@ camera_capture_preview (Camera *camera, CameraFile *file, GPContext *context)
 				ret = ptp_canon_eos_get_viewfinder_image (params , &data, &size);
 				if ((ret == 0xa102) || (ret == PTP_RC_DeviceBusy)) { /* means "not there yet" ... so wait */
 					/* wait 3 seconds at most */
-					if (waiting_for_timeout (&back_off_wait, event_start, 3*1000))
+					/*if (waiting_for_timeout (&back_off_wait, event_start, 3*1000))*/
+					/* We do not queue a wait here... this will only reduce framerates */
+					if (time_since (event_start) < 3*1000)
 						continue;
 				}
 				C_PTP_MSG (ret, "get_viewfinder_image failed");
@@ -2993,6 +3231,7 @@ camera_capture_preview (Camera *camera, CameraFile *file, GPContext *context)
 								GP_LOG_E ("len=%d larger than rest size %ld", len, (size-(xdata-data)));
 								break;
 							}
+							GP_LOG_D ("get_viewfinder_image header: len=%d type=%d", len, type);
 							GP_LOG_DATA ((char*)xdata, len, "get_viewfinder_image header:");
 							xdata = xdata+len;
 						}
@@ -3021,8 +3260,8 @@ camera_capture_preview (Camera *camera, CameraFile *file, GPContext *context)
 		SET_CONTEXT_P(params, context);
 
 		/* Nilon V and J seem to like that */
-		if (!params->controlmode && ptp_operation_issupported(params,PTP_OC_NIKON_SetControlMode)) {
-			ret = ptp_nikon_setcontrolmode (params, 1);
+		if (!params->controlmode && ptp_operation_issupported(params,PTP_OC_NIKON_ChangeCameraMode)) {
+			ret = ptp_nikon_changecameramode (params, 1);
 			/* FIXME: PTP_RC_NIKON_ChangeCameraModeFailed does not seem to be problematic */
 			if (ret != PTP_RC_NIKON_ChangeCameraModeFailed)
 				C_PTP_REP (ret);
@@ -3038,6 +3277,25 @@ enable_liveview:
 			value.u8 = 1;
 			if (have_prop(camera, params->deviceinfo.VendorExtensionID, PTP_DPC_NIKON_RecordingMedia))
 				LOG_ON_PTP_E (ptp_setdevicepropvalue (params, PTP_DPC_NIKON_RecordingMedia, &value, PTP_DTC_UINT8));
+
+			if (have_prop(camera, params->deviceinfo.VendorExtensionID, PTP_DPC_NIKON_LiveViewProhibitCondition)) {
+				PTPPropertyValue	cond;
+				C_PTP (ptp_getdevicepropvalue (params, PTP_DPC_NIKON_LiveViewProhibitCondition, &cond, PTP_DTC_UINT32));
+
+				if (cond.u32) {
+					/* we could have multiple reasons, but just report the first one. by decreasing order of possibility */
+					if (cond.u32 & (1<<8)) { gp_context_error (context, _("Liveview cannot start: Battery exhausted")); return GP_ERROR; }
+					if (cond.u32 & (1<<17)){ gp_context_error (context, _("Liveview cannot start: Temperature too high")); return GP_ERROR; }
+					if (cond.u32 & (1<<9)) { gp_context_error (context, _("Liveview cannot start: TTL error")); return GP_ERROR; }
+					if (cond.u32 & (1<<22)){ gp_context_error (context, _("Liveview cannot start: In Mirror-up operation")); return GP_ERROR; }
+					if (cond.u32 & (1<<24)){ gp_context_error (context, _("Liveview cannot start: Lens is retracting")); return GP_ERROR; }
+					if (cond.u32 & (1<<5)) { gp_context_error (context, _("Liveview cannot start: Minimum aperture warning")); return GP_ERROR; }
+					if (cond.u32 & (1<<15)){ gp_context_error (context, _("Liveview cannot start: Processing of shooting operation")); return GP_ERROR; }
+					if (cond.u32 & (1<<2)) { gp_context_error (context, _("Liveview cannot start: Sequence error")); return GP_ERROR; }
+					gp_context_error (context, _("Liveview cannot start: code 0x%08x"), cond.u32);
+					return GP_ERROR;
+				}
+			}
 
 			ret = ptp_nikon_start_liveview (params);
 			if ((ret != PTP_RC_OK) && (ret != PTP_RC_DeviceBusy))
@@ -3127,21 +3385,31 @@ enable_liveview:
 		return GP_OK;
 	}
 	case PTP_VENDOR_SONY: {
+		/* same for Alpha series and QX */
 		uint32_t	preview_object = 0xffffc002; /* this is where the liveview image is accessed */
 		unsigned char	*ximage = NULL;
-		int		tries = 20;
+		int		tries = 50;
 
 #if 0
 		/* this times out, with 0.3 seconds wait ... bad */
 		ptp_check_event (params); 	/* will stall for some reason */
 #endif
 		do {
+			PTPObjectInfo oi;
+
+			/* This state can persist for up to 1 second on the ZV-1 */
+			ret = ptp_getobjectinfo(params, preview_object, &oi);
+			if (ret == PTP_RC_InvalidObjectHandle) {
+				usleep(50*1000);
+				continue;
+			}
+
 			ret = ptp_getobject_with_size(params, preview_object, &ximage, &size);
 			if (ret == PTP_RC_OK)
 				break;
 			if (ret != PTP_RC_AccessDenied) /* we get those when we are too fast */
 				C_PTP (ret);
-			usleep(10*1000);
+			usleep(20*1000);
 		} while (tries--);
 
 		/* look for the JPEG SOI marker (0xFFD8) in data */
@@ -3351,6 +3619,17 @@ enable_liveview:
 	default:
 		break;
 	}
+	/* Check if we can do PTP 1.1 stream method */
+	if (	ptp_operation_issupported(params,PTP_OC_GetStreamInfo) &&
+		ptp_property_issupported(params, PTP_DPC_SupportedStreams)
+	)  {
+		PTPPropertyValue propval;
+
+		C_PTP (ptp_getdevicepropvalue (params, PTP_DPC_SupportedStreams, &propval, PTP_DTC_UINT32));
+		if (propval.u32 & 1) /* camera does Video streams */
+			return camera_capture_stream_preview (camera, file, context);
+		/* fallthrough */
+	}
 	return GP_ERROR_NOT_SUPPORTED;
 }
 
@@ -3469,15 +3748,15 @@ camera_nikon_capture (Camera *camera, CameraCaptureType type, CameraFilePath *pa
 		return GP_ERROR_NOT_SUPPORTED;
 
 	/* Nilon V and J seem to like that */
-	if (!params->controlmode && ptp_operation_issupported(params,PTP_OC_NIKON_SetControlMode)) {
-		ret = ptp_nikon_setcontrolmode (params, 1);
+	if (!params->controlmode && ptp_operation_issupported(params,PTP_OC_NIKON_ChangeCameraMode)) {
+		ret = ptp_nikon_changecameramode (params, 1);
 		/* FIXME: PTP_RC_NIKON_ChangeCameraModeFailed does not seem to be problematic */
 		if (ret != PTP_RC_NIKON_ChangeCameraModeFailed)
 			C_PTP_REP (ret);
 		params->controlmode = 1;
 	}
 
-	if (	!ptp_operation_issupported(params,PTP_OC_NIKON_Capture) &&
+	if (	!ptp_operation_issupported(params,PTP_OC_NIKON_InitiateCaptureRecInSdram) &&
 		!ptp_operation_issupported(params,PTP_OC_NIKON_AfCaptureSDRAM) &&
 		!ptp_operation_issupported(params,PTP_OC_NIKON_InitiateCaptureRecInMedia)
 	) {
@@ -3511,7 +3790,7 @@ camera_nikon_capture (Camera *camera, CameraCaptureType type, CameraFilePath *pa
 		if (params->inliveview) af = 0;
 	}
 
-	if (NIKON_1(params)) {
+	if (NIKON_1(params) && ptp_operation_issupported(params,PTP_OC_NIKON_StartLiveView)) { /* V1 does not have startliveview */
 		ret = ptp_nikon_start_liveview (params);
 		if ((ret != PTP_RC_OK) && (ret != PTP_RC_DeviceBusy))
 			C_PTP_REP_MSG(ret, _("Failed to enable liveview on a Nikon 1, but it is required for capture"));
@@ -3542,7 +3821,7 @@ camera_nikon_capture (Camera *camera, CameraCaptureType type, CameraFilePath *pa
 		goto capturetriggered;
 	}
 
-	if (!params->inliveview && ptp_operation_issupported(params,PTP_OC_NIKON_AfCaptureSDRAM)) {
+	if (!params->inliveview && af && ptp_operation_issupported(params,PTP_OC_NIKON_AfCaptureSDRAM)) {
 		loops = 100;
 		do {
 			ret = ptp_nikon_capture_sdram(params);
@@ -3559,7 +3838,7 @@ capturetriggered:
 
 	CR (gp_port_set_timeout (camera->port, capture_timeout));
 
-	C_PTP_REP (nikon_wait_busy (params, 100, 20000)); /* lets wait 20 seconds */
+	C_PTP_REP (nikon_wait_busy (params, 100, 1000*1000)); /* lets wait 1000 seconds (D780 can do 900seconds exposures) */
 
 	newobject = 0xffff0001;
 	done = 0; tries = 100;
@@ -3696,7 +3975,7 @@ capturetriggered:
 				ret = ptp_deleteobject (params, newobject, 0);
 				if (ret != PTP_RC_OK) {
 					GP_LOG_E ("deleteobject(%x) failed: %x", newobject, ret);
-					if (ret == PTP_RC_InvalidObjectHandle)
+					if ((ret == PTP_RC_InvalidObjectHandle)  || (ret == PTP_RC_StoreNotAvailable))
 						params->deletesdramfails = 1;
 					else
 						ret = ptp_nikon_delete_sdram_image (params, newobject);
@@ -3724,8 +4003,11 @@ capturetriggered:
 	return GP_OK;
 }
 
-/* 60 seconds timeout in ms ... (for long cycles) */
-#define EOS_CAPTURE_TIMEOUT (60*1000)
+/* 90 seconds timeout in ms ... (for long cycles)
+ * while the max shutterspeed is 30seconds, there is also postprocessing of 30seconds happening
+ * in e.g. https://github.com/gphoto/libgphoto2/issues/503
+ */
+#define EOS_CAPTURE_TIMEOUT (90*1000)
 
 /* This is currently the capture method used by the EOS 400D
  * ... in development.
@@ -4205,6 +4487,25 @@ camera_sony_capture (Camera *camera, CameraCaptureType type, CameraFilePath *pat
 	PTPDevicePropDesc	dpd;
 	struct timeval	event_start;
 
+	if (params->deviceinfo.Model && !strcmp(params->deviceinfo.Model, "ZV-1")) {
+		/* For some as yet unknown reason the ZV-1 needs around 3 seconds startup time
+		 * to be able to capture. I looked for various trigger events or property changes
+		 * but nothing worked except waiting. */
+		while (time_since (params->starttime) < 2500) {
+			/* drain the queue first */
+			if (ptp_get_one_event(params, &event)) {
+				GP_LOG_D ("during event.code=%04x Param1=%08x", event.Code, event.Param1);
+				continue;
+			}
+			/* wait for events and poll property data */
+			C_PTP (ptp_check_event (params));
+
+			C_PTP (ptp_sony_getalldevicepropdesc (params)); /* avoid caching */
+		}
+	}
+
+	/* regular code */
+
 	C_PTP (ptp_generic_getdevicepropdesc (params, PTP_DPC_CompressionSetting, &dpd));
 
 	GP_LOG_D ("dpd.CurrentValue.u8 = %x", dpd.CurrentValue.u8);
@@ -4215,7 +4516,6 @@ camera_sony_capture (Camera *camera, CameraCaptureType type, CameraFilePath *pat
 	if (dpd.CurrentValue.u8 == 0x13) {
 		GP_LOG_D ("expecting raw+jpeg capture");
 	}
-
 	/* half-press */
 	propval.u16 = 2;
 	C_PTP (ptp_sony_setdevicecontrolvalueb (params, PTP_DPC_SONY_AutoFocus, &propval, PTP_DTC_UINT16));
@@ -4226,7 +4526,7 @@ camera_sony_capture (Camera *camera, CameraCaptureType type, CameraFilePath *pat
 
 	/* Check if we are in manual focus to skip the wait for focus */
 	C_PTP (ptp_generic_getdevicepropdesc (params, PTP_DPC_FocusMode, &dpd));
-	if (dpd.CurrentValue.u8 == 2) {
+	if (dpd.CurrentValue.u16 != 1) { /* 1 is Manual .. no need to wait there for focusing */
 
 		/* Now hold down the shutter button for a bit. We probably need to hold it as long as it takes to
 		* get focus, indicated by the 0xD213 property. But hold it for at most 1 second.
@@ -4659,48 +4959,11 @@ camera_olympus_omd_capture (Camera *camera, CameraCaptureType type, CameraFilePa
 
 		while (ptp_get_one_event(params, &event)) {
 			switch (event.Code) {
-			case 0xc002:
+			case PTP_EC_Olympus_ObjectAdded:
+			case PTP_EC_Olympus_ObjectAdded_New:	/* seen in newer traces, https://github.com/gphoto/gphoto2/issues/310 */
 			case PTP_EC_ObjectAdded:
 				newobject = event.Param1;
 				goto downloadfile;
-			case 0xc003:
-#if 0
-			{ /* we seem to receive the event when ready ... not sure if this is the right trigger, as it has unrelated parameters */
-				CameraFile	*file;
-				unsigned char	*data = NULL;
-				unsigned int	size = 0;
-				CameraFileInfo	info;
-				int		ret;
-
-				C_PTP_REP (ptp_olympus_sdram_image(params, &data, &size));
-
-				gp_file_new (&file);
-				gp_file_set_data_and_size (file, (char*)data, size);
-
-				sprintf(path->folder, "/store_deadbeef");
-				sprintf(path->name, "capt%04d.jpg", params->capcnt++);
-
-				ret = gp_filesystem_append(camera->fs, path->folder, path->name, context);
-				if (ret != GP_OK) {
-					gp_file_free (file);
-					return ret;
-				}
-				ret = gp_filesystem_set_file_noop(camera->fs, path->folder, path->name, GP_FILE_TYPE_NORMAL, file, context);
-				if (ret != GP_OK) {
-					gp_file_free (file);
-					return ret;
-				}
-				memset(&info, 0, sizeof(info));
-				/* We also get the fs info for free, so just set it */
-				info.file.fields = GP_FILE_INFO_TYPE | GP_FILE_INFO_SIZE | GP_FILE_INFO_MTIME;
-				strcpy (info.file.type, GP_MIME_JPEG);
-				info.file.size		= size;
-				info.file.mtime		= time(NULL);
-
-				gp_filesystem_set_info_noop(camera->fs, path->folder, path->name, info, context);
-				return GP_OK;
-			}
-#endif
 			default:
 				GP_LOG_D ("unexpected unhandled event Code %04x, Param 1 %08x", event.Code, event.Param1);
 				break;
@@ -4795,7 +5058,7 @@ camera_capture (Camera *camera, CameraCaptureType type, CameraFilePath *path,
 
 	/* 1st gen, 2nd gen nikon capture only go to SDRAM */
 	if (	(params->deviceinfo.VendorExtensionID == PTP_VENDOR_NIKON) &&
-		(ptp_operation_issupported(params, PTP_OC_NIKON_Capture) ||
+		(ptp_operation_issupported(params, PTP_OC_NIKON_InitiateCaptureRecInSdram) ||
 		 ptp_operation_issupported(params, PTP_OC_NIKON_AfCaptureSDRAM)
 	)) {
 		int ret = GP_ERROR_NOT_SUPPORTED;
@@ -4946,7 +5209,7 @@ fallback:
 	CR (gp_port_set_timeout (camera->port, normal_timeout));
 
 	/* The standard defined way ... wait for some capture related events. */
-	/* The Nikon 1 series emits ObjectAdded occasionaly after
+	/* The Nikon 1 series emits ObjectAdded occasionally after
 	 * the CaptureComplete event, while others do it the other way
 	 * round. Handle that case with some bitmask. */
 	done = 0; tries = 20;
@@ -5053,7 +5316,9 @@ camera_trigger_canon_eos_capture (Camera *camera, GPContext *context)
 			C_PTP (ptp_canon_eos_getdevicepropdesc (params, PTP_DPC_CANON_EOS_AvailableShots, &dpd));
 			if (dpd.CurrentValue.u32 < 100) {
 				/* Tell the camera we have enough free space on the PC */
+				ptp_canon_eos_setuilock(params);
 				LOG_ON_PTP_E (ptp_canon_eos_pchddcapacity(params, 0x0fffffff, 0x00001000, 0x00000001));
+				ptp_canon_eos_resetuilock(params);
 			}
 		}
 	}
@@ -5230,17 +5495,17 @@ camera_trigger_capture (Camera *camera, GPContext *context)
 	/* Nilon V and J seem to like that */
 	if (	(params->deviceinfo.VendorExtensionID == PTP_VENDOR_NIKON) &&
 		!params->controlmode &&
-		ptp_operation_issupported(params,PTP_OC_NIKON_SetControlMode)
+		ptp_operation_issupported(params,PTP_OC_NIKON_ChangeCameraMode)
 	) {
-		ret = ptp_nikon_setcontrolmode (params, 1);
+		ret = ptp_nikon_changecameramode (params, 1);
 		/* FIXME: PTP_RC_NIKON_ChangeCameraModeFailed does not seem to be problematic */
 		if (ret != PTP_RC_NIKON_ChangeCameraModeFailed)
 			C_PTP_REP (ret);
 		params->controlmode = 1;
 	}
 
-	/* On Nikon 1 series, the liveview must be enabled before capture works */
-	if (NIKON_1(params)) {
+	/* On Nikon 1 series, the liveview must be enabled before capture works ... not on V1 which does not have it. */
+	if (NIKON_1(params) && ptp_operation_issupported(params,PTP_OC_NIKON_StartLiveView)) {
 		ret = ptp_nikon_start_liveview (params);
 		if ((ret != PTP_RC_OK) && (ret != PTP_RC_DeviceBusy))
 			C_PTP_REP_MSG(ret, _("Failed to enable liveview on a Nikon 1, but it is required for capture"));
@@ -5289,13 +5554,14 @@ camera_trigger_capture (Camera *camera, GPContext *context)
 			/* sleep a bit perhaps ? or check events? */
 		} while (tries--);
 
-		C_PTP_REP (nikon_wait_busy (params, 100, 20000)); /* lets wait 20 second */
+		/* busyness will be reported during the whole of the exposure time. */
+		C_PTP_REP (nikon_wait_busy (params, 100, 1000*1000)); /* lets wait 1000 seconds (D780 can do 900 second exposures) */
 		return GP_OK;
 	}
 
 	/* Nikon */
 	if (	(params->deviceinfo.VendorExtensionID == PTP_VENDOR_NIKON) &&
-		(ptp_operation_issupported(params, PTP_OC_NIKON_Capture) ||
+		(ptp_operation_issupported(params, PTP_OC_NIKON_InitiateCaptureRecInSdram) ||
 		 ptp_operation_issupported(params, PTP_OC_NIKON_AfCaptureSDRAM) 
 		)
 		&& sdram
@@ -5315,7 +5581,7 @@ camera_trigger_capture (Camera *camera, GPContext *context)
 		}
 
 		do {
-			if (!inliveview && ptp_operation_issupported (params,PTP_OC_NIKON_AfCaptureSDRAM))
+			if (!inliveview && af && ptp_operation_issupported (params,PTP_OC_NIKON_AfCaptureSDRAM))
 				ret = ptp_nikon_capture_sdram (params);
 			else
 				ret = ptp_nikon_capture (params, 0xffffffff);
@@ -5323,7 +5589,7 @@ camera_trigger_capture (Camera *camera, GPContext *context)
 				return translate_ptp_result (ret);
 		} while (ret == PTP_RC_DeviceBusy);
 
-		C_PTP_REP (nikon_wait_busy (params, 100, 20000)); /* lets wait 20 seconds */
+		C_PTP_REP (nikon_wait_busy (params, 100, 1000*1000)); /* lets wait 1000 seconds (D780 can do 900 second exposures) */
 		return GP_OK;
 	}
 
@@ -5428,8 +5694,7 @@ camera_trigger_capture (Camera *camera, GPContext *context)
 
 		/* Wait for focus only in automatic focus mode */
 		C_PTP (ptp_generic_getdevicepropdesc (params, PTP_DPC_FocusMode, &dpd));
-		if (dpd.CurrentValue.u8 == 2) {
-
+		if (dpd.CurrentValue.u16 != 1) { /* 1 is Manual .. no need to wait there for focusing */
 			/* Now hold down the shutter button for a bit. We probably need to hold it as long as it takes to
 			* get focus, indicated by the 0xD213 property. But hold it for at most 1 second.
 			*/
@@ -5826,7 +6091,7 @@ camera_wait_for_event (Camera *camera, int timeout,
 	}
 
 	if (	(params->deviceinfo.VendorExtensionID == PTP_VENDOR_NIKON) &&
-		ptp_operation_issupported(params, PTP_OC_NIKON_CheckEvent)
+		ptp_operation_issupported(params, PTP_OC_NIKON_GetEvent)
 	) {
 		do {
 			C_PTP_REP (ptp_check_event (params));
@@ -6056,7 +6321,7 @@ sonyout:
 		return GP_OK;
 	}
 	if 	(params->deviceinfo.VendorExtensionID == PTP_VENDOR_GP_OLYMPUS_OMD)
-	 {
+	{
 
 		do {
 			C_PTP_REP (ptp_check_event (params));
@@ -6064,16 +6329,25 @@ sonyout:
 			while (ptp_get_one_event(params, &event)) {
 				GP_LOG_D ("received event Code %04x, Param 1 %08x", event.Code, event.Param1);
 				switch (event.Code) {
-				case 0xC002:
+				case PTP_EC_Olympus_ObjectAdded:
+				case PTP_EC_Olympus_ObjectAdded_New:
 				case PTP_EC_ObjectAdded:
 					newobject = event.Param1;
 					goto downloadomdfile;
+				case PTP_EC_Olympus_DevicePropChanged:
+				case PTP_EC_Olympus_DevicePropChanged_New:
+					*eventtype = GP_EVENT_UNKNOWN;
+					C_MEM (*eventdata = malloc(strlen("PTP Property 0123 changed to 0x012345678")+1));
+					sprintf (*eventdata, "PTP Property %04x changed to 0x%08x", event.Param1, event.Param2);
+					return GP_OK;
 				default:
-					GP_LOG_D ("unexpected unhandled event Code %04x, Param 1 %08x", event.Code, event.Param1);
-					break;
+					*eventtype = GP_EVENT_UNKNOWN;
+					C_MEM (*eventdata = malloc(strlen("PTP Event 0123, Param1 01234567")+1));
+					sprintf (*eventdata, "PTP Event %04x, Param1 %08x", event.Code, event.Param1);
+					return GP_OK;
 				}
 			}
-		}  while (waiting_for_timeout (&back_off_wait, event_start, 65000)); /* wait for 65 seconds after busy is no longer signaled */
+		}  while (waiting_for_timeout (&back_off_wait, event_start, timeout));
 
 downloadomdfile:
 		C_MEM (path = malloc(sizeof(CameraFilePath)));
@@ -6452,6 +6726,47 @@ camera_summary (Camera* camera, CameraText* summary, GPContext *context)
 	}
 	APPEND_TXT ("\n");
 
+	/* PTP 1.1 streams */
+	if (	ptp_operation_issupported(params,PTP_OC_GetStreamInfo) &&
+		ptp_property_issupported(params, PTP_DPC_SupportedStreams)
+	)  {
+		PTPPropertyValue propval;
+
+		ret = ptp_getdevicepropvalue (params, PTP_DPC_SupportedStreams, &propval, PTP_DTC_UINT32);
+		if (ret == PTP_RC_OK) {
+			APPEND_TXT (_("\nStreams:"));
+			APPEND_TXT ("%08x", propval.u32);
+			APPEND_TXT ("\n");
+			for (i=0;i<31;i++) {
+				PTPStreamInfo streaminfo;
+
+				if ((1<<i) & propval.u32) {
+					APPEND_TXT ("\t");
+					switch (i) {
+					case 0: APPEND_TXT (_("Video"));
+						break;
+					case 1: APPEND_TXT (_("Audio"));
+						break;
+					default: APPEND_TXT ("%d", i);
+						break;
+					}
+					ret = ptp_getstreaminfo (params, i, &streaminfo);
+					if (ret == PTP_RC_OK) {
+						APPEND_TXT( ": dss: %lud, timeres: %lud, fhsize: %d, fmxsize: %d, phsize: %d, pmsize: %d, palign: %d\n",
+							streaminfo.DatasetSize,
+							streaminfo.TimeResolution,
+							streaminfo.FrameHeaderSize,
+							streaminfo.FrameMaxSize,
+							streaminfo.PacketHeaderSize,
+							streaminfo.PacketMaxSize,
+							streaminfo.PacketAlignment
+						);
+					} else APPEND_TXT (": error 0x%04x on getstreaminfo\n", ret);
+				}
+			}
+		}
+	}
+
 	if (is_mtp_capable (camera) &&
 	    ptp_operation_issupported(params,PTP_OC_MTP_GetObjectPropsSupported)
 	) {
@@ -6514,7 +6829,7 @@ camera_summary (Camera* camera, CameraText* summary, GPContext *context)
 				APPEND_TXT (_("Canon EOS Capture 2, "));
 			break;
 		case PTP_VENDOR_NIKON:
-			if (ptp_operation_issupported(params, PTP_OC_NIKON_Capture))
+			if (ptp_operation_issupported(params, PTP_OC_NIKON_InitiateCaptureRecInSdram))
 				APPEND_TXT (_("Nikon Capture 1, "));
 			if (ptp_operation_issupported(params, PTP_OC_NIKON_AfCaptureSDRAM))
 				APPEND_TXT (_("Nikon Capture 2, "));
@@ -6737,14 +7052,14 @@ find_child (PTPParams *params,const char *file,uint32_t storage,uint32_t handle,
 		if (ret != PTP_RC_OK) {
 			/* NOTE: the "i" array entry might now be invalid, as object_want can remove objects from the list */
 			GP_LOG_D("failed getting info of oid 0x%08x?", oid);
-			/* could happen if file gets removed inbetween */
+			/* could happen if file gets removed between */
 			continue;
 		}
 		if ((ob->oi.StorageID==storage) && (ob->oi.ParentObject==handle)) {
 			ret = ptp_object_want (params, oid, PTPOBJECT_OBJECTINFO_LOADED, &ob);
 			if (ret != PTP_RC_OK) {
 				GP_LOG_D("failed getting info of oid 0x%08x?", oid);
-				/* could happen if file gets removed inbetween */
+				/* could happen if file gets removed between */
 				/* FIXME: should remove, but then we irritate our list */
 				continue;
 			}
@@ -6813,7 +7128,7 @@ file_list_func (CameraFilesystem *fs, const char *folder, CameraList *list,
     /* compute storage ID value from folder patch */
     folder_to_storage(folder,storage);
 
-    /* Get (parent) folder handle omiting storage pseudofolder */
+    /* Get (parent) folder handle omitting storage pseudofolder */
     find_folder_handle(params,folder,storage,parent);
 
     C_PTP_REP (ptp_list_folder (params, storage, parent));
@@ -6939,7 +7254,7 @@ folder_list_func (CameraFilesystem *fs, const char *folder, CameraList *list,
 	/* compute storage ID value from folder path */
 	folder_to_storage (folder,storage);
 
-	/* Get folder handle omiting storage pseudofolder */
+	/* Get folder handle omitting storage pseudofolder */
 	find_folder_handle (params,folder,storage,handler);
 
 	/* list this directory */
@@ -7353,7 +7668,7 @@ mtp_put_playlist(
 
 		/* compute storage ID value from folder patch */
 		folder_to_storage(fn,storage);
-		/* Get file number omiting storage pseudofolder */
+		/* Get file number omitting storage pseudofolder */
 		find_folder_handle(params, fn, storage, objectid);
 		objectid = find_child(params, filename, storage, objectid, NULL);
 		if (objectid != PTP_HANDLER_SPECIAL) {
@@ -7486,7 +7801,7 @@ read_file_func (CameraFilesystem *fs, const char *folder, const char *filename,
 
 	/* compute storage ID value from folder patch */
 	folder_to_storage(folder,storage);
-	/* Get file number omiting storage pseudofolder */
+	/* Get file number omitting storage pseudofolder */
 	find_folder_handle(params, folder, storage, oid);
 	oid = find_child(params, filename, storage, oid, &ob);
 	if (oid == PTP_HANDLER_SPECIAL) {
@@ -7612,7 +7927,7 @@ get_file_func (CameraFilesystem *fs, const char *folder, const char *filename,
 
 	/* compute storage ID value from folder patch */
 	folder_to_storage(folder,storage);
-	/* Get file number omiting storage pseudofolder */
+	/* Get file number omitting storage pseudofolder */
 	find_folder_handle(params, folder, storage, oid);
 	oid = find_child(params, filename, storage, oid, &ob);
 	if (oid == PTP_HANDLER_SPECIAL) {
@@ -7668,8 +7983,9 @@ get_file_func (CameraFilesystem *fs, const char *folder, const char *filename,
 		break;
 	}
 	case	GP_FILE_TYPE_PREVIEW: {
-		unsigned char *ximage = NULL;
-		unsigned int xlen;
+		unsigned char	*ximage = NULL;
+		unsigned int	xlen;
+		char		buf[200];
 
 		/* If thumb size is 0, and the ofc is not an image type (0x38xx or 0xb8xx)
 		 * then there is no thumbnail at all... */
@@ -7683,7 +7999,17 @@ get_file_func (CameraFilesystem *fs, const char *folder, const char *filename,
 			((ob->oi.ObjectFormat != PTP_OFC_CANON_CR3))
 		))
 			return GP_ERROR_NOT_SUPPORTED;
-		C_PTP_REP (ptp_getthumb(params, oid, &ximage, &xlen));
+
+		if (	(params->deviceinfo.VendorExtensionID == PTP_VENDOR_NIKON)	&&
+			ptp_operation_issupported(params,PTP_OC_NIKON_GetLargeThumb)	&&
+			(GP_OK == gp_setting_get("ptp2","thumbsize",buf))		&&
+			!strcmp(buf,"large")
+		) {
+			C_PTP_REP (ptp_nikon_getlargethumb(params, oid, &ximage, &xlen));
+		} else {
+			C_PTP_REP (ptp_getthumb(params, oid, &ximage, &xlen));
+		}
+
 		set_mimetype (file, params->deviceinfo.VendorExtensionID, ob->oi.ThumbFormat);
 		CR (gp_file_set_data_and_size (file, (char*)ximage, xlen));
 		break;
@@ -7737,6 +8063,10 @@ get_file_func (CameraFilesystem *fs, const char *folder, const char *filename,
 					free (ximage);
 					ximage = NULL;
 					offset += xlen;
+					if (!xlen) {
+						GP_LOG_E ("getpartialobject loop: offset=%d, size is %d, xlen returned is 0?", offset, size);
+						break;
+					}
 				}
 				goto done;
 		}
@@ -7758,6 +8088,10 @@ get_file_func (CameraFilesystem *fs, const char *folder, const char *filename,
 					free (ximage);
 					ximage = NULL;
 					offset += xsize;
+					if (!xsize) {
+						GP_LOG_E ("getpartialobject loop: offset=%d, size is %d, xlen returned is 0?", offset, size);
+						break;
+					}
 				}
 				goto done;
 		}
@@ -7848,7 +8182,7 @@ put_file_func (CameraFilesystem *fs, const char *folder, const char *filename,
 			/* compute storage ID value from folder patch */
 			folder_to_storage(folder,storage);
 
-			/* Get file number omiting storage pseudofolder */
+			/* Get file number omitting storage pseudofolder */
 			find_folder_handle(params, folder, storage, object_id);
 			object_id = find_child(params, filename, storage, object_id, &ob);
 			if (object_id ==PTP_HANDLER_SPECIAL) {
@@ -7864,7 +8198,7 @@ put_file_func (CameraFilesystem *fs, const char *folder, const char *filename,
 	/* compute storage ID value from folder patch */
 	folder_to_storage(folder,storage);
 
-	/* get parent folder id omiting storage pseudofolder */
+	/* get parent folder id omitting storage pseudofolder */
 	find_folder_handle(params,folder,storage,parent);
 
 	/* if you desire to put file to root folder, you have to use
@@ -7957,7 +8291,7 @@ delete_file_func (CameraFilesystem *fs, const char *folder,
 	C_PTP_REP (ptp_check_event (params));
 	/* compute storage ID value from folder patch */
 	folder_to_storage(folder,storage);
-	/* Get file number omiting storage pseudofolder */
+	/* Get file number omitting storage pseudofolder */
 	find_folder_handle(params, folder, storage, oid);
 	oid = find_child(params, filename, storage, oid, NULL);
 
@@ -8004,7 +8338,7 @@ remove_dir_func (CameraFilesystem *fs, const char *folder,
 	C_PTP_REP (ptp_check_event (params));
 	/* compute storage ID value from folder patch */
 	folder_to_storage(folder,storage);
-	/* Get file number omiting storage pseudofolder */
+	/* Get file number omitting storage pseudofolder */
 	find_folder_handle(params, folder, storage, oid);
 	oid = find_child(params, foldername, storage, oid, NULL);
 	if (oid == PTP_HANDLER_SPECIAL)
@@ -8030,7 +8364,7 @@ set_info_func (CameraFilesystem *fs, const char *folder, const char *filename,
 	camera->pl->checkevents = TRUE;
 	/* compute storage ID value from folder patch */
 	folder_to_storage(folder,storage);
-	/* Get file number omiting storage pseudofolder */
+	/* Get file number omitting storage pseudofolder */
 	find_folder_handle(params, folder, storage, object_id);
 	object_id = find_child(params, filename, storage, object_id, &ob);
 	if (object_id == PTP_HANDLER_SPECIAL)
@@ -8074,7 +8408,7 @@ get_info_func (CameraFilesystem *fs, const char *folder, const char *filename,
 
 	/* compute storage ID value from folder patch */
 	folder_to_storage(folder,storage);
-	/* Get file number omiting storage pseudofolder */
+	/* Get file number omitting storage pseudofolder */
 	find_folder_handle(params, folder, storage, oid);
 	oid = find_child(params, filename, storage, oid, &ob);
 	if (oid == PTP_HANDLER_SPECIAL)
@@ -8171,7 +8505,7 @@ make_dir_func (CameraFilesystem *fs, const char *folder, const char *foldername,
 	memset(&oi, 0, sizeof (PTPObjectInfo));
 	/* compute storage ID value from folder patch */
 	folder_to_storage(folder,storage);
-	/* get parent folder id omiting storage pseudofolder */
+	/* get parent folder id omitting storage pseudofolder */
 	find_folder_handle(params,folder,storage,parent);
 
 	/* if you desire to make dir in 'root' folder, you have to use
@@ -8504,12 +8838,12 @@ camera_init (Camera *camera, GPContext *context)
 	XT(normal_timeout,USB_NORMAL_TIMEOUT);
 	XT(capture_timeout,USB_TIMEOUT_CAPTURE);
 
-	/* Choose a shorter timeout on inital setup to avoid
+	/* Choose a shorter timeout on initial setup to avoid
 	 * having the user wait too long.
 	 */
 	if (a.usb_vendor == 0x4a9) { /* CANON */
 		/* our special canon friends get a shorter timeout, sinc ethey
-		 * occasionaly need 2 retries. */
+		 * occasionally need 2 retries. */
 		XT(canon_start_timeout,USB_CANON_START_TIMEOUT);
 		CR (gp_port_set_timeout (camera->port, canon_start_timeout));
 	} else {
@@ -8598,6 +8932,8 @@ camera_init (Camera *camera, GPContext *context)
 	/* get device info */
 	C_PTP_REP (ptp_getdeviceinfo(params, &params->deviceinfo));
 
+	print_debug_deviceinfo(params, &params->deviceinfo);
+
 	CR (fixup_cached_deviceinfo (camera,&params->deviceinfo));
 
 	print_debug_deviceinfo(params, &params->deviceinfo);
@@ -8634,6 +8970,7 @@ camera_init (Camera *camera, GPContext *context)
 				/* Setting remote mode changes device info on EOS M2,
 				   so have to reget it */
 				C_PTP (ptp_getdeviceinfo(&camera->pl->params, &camera->pl->params.deviceinfo));
+				print_debug_deviceinfo(params, &params->deviceinfo);
 				CR (fixup_cached_deviceinfo (camera, &camera->pl->params.deviceinfo));
 				print_debug_deviceinfo(params, &params->deviceinfo);
 			} else {
@@ -8646,7 +8983,14 @@ camera_init (Camera *camera, GPContext *context)
 			add_special_file("curve.ntc", nikon_curve_get, nikon_curve_put);
 		break;
 	case PTP_VENDOR_SONY:
-		if (ptp_operation_issupported(params, 0x9280)) {
+		/* this seems to crash the HX100V and HX9V and NEX
+		 * https://github.com/gphoto/libgphoto2/issues/85
+		 */
+		if (	ptp_operation_issupported(params, 0x9280)	&&
+			!strstr(params->deviceinfo.Model,"HX")		&&
+			!strstr(params->deviceinfo.Model,"NEX")		&&
+			!strstr(params->deviceinfo.Model,"QX")
+		) {
 #if 0
 			C_PTP (ptp_sony_9280(params, 0x1,0,1,0,0));
 			C_PTP (ptp_sony_9281(params, 0x1));	/* no data sent back */
@@ -8667,6 +9011,16 @@ camera_init (Camera *camera, GPContext *context)
 		break;
 	case PTP_VENDOR_FUJI:
 		CR (camera_prepare_capture (camera, context));
+		break;
+	case PTP_VENDOR_GP_LEICA:
+		if (ptp_operation_issupported(params, PTP_OC_LEICA_LEOpenSession)) {
+			PTPDeviceInfo	pdi;
+
+			C_PTP (ptp_leica_leopensession (params, 0));	/* arguments might not be complete */
+			C_PTP_REP (ptp_getdeviceinfo (params, &pdi));
+			CR (fixup_cached_deviceinfo (camera, &pdi));
+			print_debug_deviceinfo(params, &params->deviceinfo);
+		}
 		break;
 	default:
 		break;
@@ -8739,8 +9093,26 @@ camera_init (Camera *camera, GPContext *context)
 	}
 	/* moved down here in case the filesystem needs to first be initialized as the Olympus app does */
 	if (params->deviceinfo.VendorExtensionID == PTP_VENDOR_GP_OLYMPUS_OMD) {
+		unsigned int k;
+
 		GP_LOG_D ("Initializing Olympus ... ");
 		ptp_olympus_init_pc_mode(params);
+
+		/* try to refetch the storage ids, set before only has 0x00000001 */
+		if (params->storageids.n) {
+			free (params->storageids.Storage);
+			params->storageids.Storage = NULL;
+			params->storageids.n = 0;
+		}
+
+		C_PTP (ptp_getstorageids(params, &params->storageids));
+
+		/* refetch root */
+		for (k=0;k<params->storageids.n;k++) {
+			if (!(params->storageids.Storage[k] & 0xffff)) continue;
+			if (params->storageids.Storage[k] == 0x80000001) continue;
+			ptp_list_folder (params, params->storageids.Storage[k], PTP_HANDLER_SPECIAL);
+		}
 
 		/*
 		if(params->storageids.n > 0) { // Olympus app gets storage info for first item, so emulating here
@@ -8765,9 +9137,6 @@ camera_init (Camera *camera, GPContext *context)
 		}
 		*/
 	}
-
-
-
 	SET_CONTEXT(camera, NULL);
 	return GP_OK;
 }

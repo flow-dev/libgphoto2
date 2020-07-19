@@ -121,6 +121,9 @@ static struct {
 	{"Nikon", "CoolPix 4300 (Sierra Mode)", SIERRA_MODEL_CAM_DESC, 0x04b0, 0x010e,
 						SIERRA_WRAP_USB_NIKON | SIERRA_NO_51,
 							&cp4300_cam_desc},
+	{"Nikon", "CoolPix 4100 (Sierra Mode)", SIERRA_MODEL_CAM_DESC, 0x04b0, 0x012c,
+						SIERRA_WRAP_USB_NIKON | SIERRA_NO_51,
+							&cp4300_cam_desc},
 	{"Nikon", "CoolPix 3500 (Sierra Mode)", SIERRA_MODEL_CAM_DESC, 0x04b0, 0x0110,
 						SIERRA_WRAP_USB_NIKON | SIERRA_NO_51,
 							&cp880_cam_desc},
@@ -2125,7 +2128,7 @@ camera_about (Camera *camera, CameraText *about, GPContext *context)
  * @data: input data table
  * @data_size: table size
  * @jpeg_data: return JPEG data table (NULL if no valid data is found).
- *             To be free by the the caller.
+ *             To be free by the caller.
  * @jpeg_size: return size of the jpeg_data table.
  *
  * Extract JPEG data form the provided input data (looking for the SOI

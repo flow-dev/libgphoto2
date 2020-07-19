@@ -1,0 +1,95 @@
+Camera summary:
+Manufacturer: Sony Corporation
+Model: DSC-QX30U
+  Version: 3.00
+  Serial Number: 0000000000000000nnnnnnnnnnnnnnnn
+Vendor Extension ID: 0x11 (1.0)
+Vendor Extension Description: Sony PTP Extensions
+
+Capture Formats: 
+Display Formats: Association/Directory, MPEG, JPEG, Unknown(b982), Unknown(b301), Undefined Type, ARW, Unknown(b310)
+
+Device Capabilities:
+	File Download, No File Deletion, No File Upload
+	No Image Capture, No Open Capture, No vendor specific capture
+
+Storage Devices Summary:
+
+Device Property Summary:
+
+/main/actions/opcode
+Label: PTP Opcode
+Readonly: 0
+Type: TEXT
+Current: 0x1001,0xparam1,0xparam2
+END
+/main/status/serialnumber
+Label: Serial Number
+Readonly: 0
+Type: TEXT
+Current: 00000000000000004205000003202433
+END
+/main/status/manufacturer
+Label: Camera Manufacturer
+Readonly: 0
+Type: TEXT
+Current: Sony Corporation
+END
+/main/status/cameramodel
+Label: Camera Model
+Readonly: 0
+Type: TEXT
+Current: DSC-QX30U
+END
+/main/status/deviceversion
+Label: Device Version
+Readonly: 0
+Type: TEXT
+Current: 3.00
+END
+/main/status/vendorextension
+Label: Vendor Extension
+Readonly: 0
+Type: TEXT
+Current: Sony PTP Extensions
+END
+
+Device info:
+Manufacturer: Sony Corporation
+  Model: DSC-QX30U
+  device version: 3.00
+  serial number: '0000000000000000nnnnnnnnnnnnnnnn'
+Vendor extension ID: 0x00000011
+Vendor extension version: 100
+Vendor extension description: Sony PTP Extensions
+Functional Mode: 0x0000
+PTP Standard Version: 100
+Supported operations:
+  0x1001 (Get device info)
+  0x1002 (Open session)
+  0x1003 (Close session)
+  0x1004 (Get storage IDs)
+  0x1005 (Get storage info)
+  0x1006 (Get number of objects)
+  0x1007 (Get object handles)
+  0x1008 (Get object info)
+  0x1009 (Get object)
+  0x100a (Get thumbnail)
+  0x101b (Get partial object)
+
+  0x967d (Unknown PTP_OC)
+  0x96f1 (Unknown PTP_OC)
+  0x96f5 (Unknown PTP_OC)
+  0x96f6 (Unknown PTP_OC)	qx_getallpropertydata
+  0x96f8 (Unknown PTP_OC)	qx_setpropval
+  0x96fa (Unknown PTP_OC)	(setpropval direct?)
+  0x96fd (Unknown PTP_OC)	qx_getproperties
+  0x96fe (Unknown PTP_OC)	qx_connect
+
+  0x9801 (Unknown PTP_OC)
+  0x9802 (Unknown PTP_OC)
+  0x9803 (Unknown PTP_OC)
+  0x9805 (Unknown PTP_OC)
+Events Supported:
+  0xc204 (Unknown Event)
+Device Properties Supported:

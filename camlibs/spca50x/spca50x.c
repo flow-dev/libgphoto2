@@ -202,7 +202,7 @@ spca50x_capture (CameraPrivateLibrary * lib)
 	return GP_OK;
 }
 
-void
+int
 create_jpeg_from_data (uint8_t * dst, uint8_t * src, int qIndex, int w,
 		       int h, uint8_t format, int o_size, int *size,
 		       int omit_huffman_table, int omit_escape)
@@ -244,18 +244,22 @@ create_jpeg_from_data (uint8_t * dst, uint8_t * src, int qIndex, int w,
 	dst += SPCA50X_JPG_DEFAULT_HEADER_PART3_LENGTH;
 
 	for (i = 0; i < o_size; i++) {
+		if (dst - start >= *size) return GP_ERROR;
 		value = *(src + i) & 0xFF;
 		*(dst) = value;
 		dst++;
 
 		if (value == 0xFF && !omit_escape) {
+			if (dst - start >= *size) return GP_ERROR;
 			*(dst) = 0x00;
 			dst++;
 		}
 	}
+	if (dst + 2 - start >= *size) return GP_ERROR;
 	/* Add end of image marker */
 	*(dst++) = 0xFF;
 	*(dst++) = 0xD9;
 
 	*size = dst - start;
+	return GP_OK;
 }

@@ -1,6 +1,6 @@
 /* config.c
  *
- * Copyright (C) 2003-2019 Marcus Meissner <marcus@jet.franken.de>
+ * Copyright (C) 2003-2020 Marcus Meissner <marcus@jet.franken.de>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -94,6 +94,7 @@ have_prop(Camera *camera, uint16_t vendor, uint16_t prop) {
 	}
 	if ((prop & 0x7000) == 0x1000) { /* commands */
 		for (i=0; i<camera->pl->params.deviceinfo.OperationsSupported_len; i++) {
+
 			if (prop != camera->pl->params.deviceinfo.OperationsSupported[i])
 				continue;
 			if ((prop & 0xf000) == 0x1000) /* generic property */
@@ -351,7 +352,9 @@ camera_canon_eos_update_capture_target(Camera *camera, GPContext *context, int v
 			ret = ptp_canon_eos_pchddcapacity(params, 0x7fffffff, 0x00001000, 0x00000001);
 			 */
 
+			LOG_ON_PTP_E (ptp_canon_eos_setuilock (params));
 			ret = ptp_canon_eos_pchddcapacity(params, 0x0fffffff, 0x00001000, 0x00000001);
+			LOG_ON_PTP_E (ptp_canon_eos_resetuilock (params));
 			/* not so bad if its just busy, would also fail later. */
 			if (ret == PTP_RC_DeviceBusy) ret = PTP_RC_OK;
 			C_PTP (ret);
@@ -424,7 +427,7 @@ camera_prepare_canon_eos_capture(Camera *camera, GPContext *context) {
 		ptp_free_EOS_DI (&x);
 	}
 
-	/* The new EOS occasionaly returned an empty event set ... likely because we are too fast. try again some times. */
+	/* The new EOS occasionally returned an empty event set ... likely because we are too fast. try again some times. */
 	C_PTP (ptp_check_eos_events (params));
 	tries = 10;
 	while (--tries && !have_eos_prop(params,PTP_VENDOR_CANON,PTP_DPC_CANON_EOS_EVFOutputDevice)) {
@@ -453,7 +456,15 @@ camera_prepare_canon_eos_capture(Camera *camera, GPContext *context) {
 	C_PTP (ptp_check_eos_events (params));
 	params->eos_captureenabled = 1;
 
+	/* run this only on EOS M, not on PowerShot SX */
+	/* I lost track where it is needed.
+	 * Need it:
+	 * + EOS M10
+	 * + PowerShot SX 720HS
+	 * + PowerShot G9x mark II
+	 */
 	if (is_canon_eos_m (params)) {
+		/* This code is needed on EOS m3 at least. might not be needed on others ... mess :/ */
 		PTPPropertyValue    ct_val;
 
 		GP_LOG_D ("EOS M detected");
@@ -486,6 +497,13 @@ camera_prepare_capture (Camera *camera, GPContext *context)
 			if (!have_prop (camera, PTP_VENDOR_FUJI, 0xd207))
 				return GP_OK;
 
+			/* timelapse does:
+			 * d38c -> 1	(PC Mode)
+			 * d207 -> 2	(USB control)
+			 */
+
+			propval.u16 = 0x0001;
+			LOG_ON_PTP_E (ptp_setdevicepropvalue (params, 0xd38c, &propval, PTP_DTC_UINT16));
 			propval.u16 = 0x0002;
 			LOG_ON_PTP_E (ptp_setdevicepropvalue (params, 0xd207, &propval, PTP_DTC_UINT16));
 			return GP_OK;
@@ -557,7 +575,7 @@ camera_unprepare_canon_eos_capture(Camera *camera, GPContext *context) {
 	CR (camera_canon_eos_update_capture_target(camera, context, 1));
 
 	if (ptp_operation_issupported(&camera->pl->params, PTP_OC_CANON_EOS_ResetUILock))
-		C_PTP (ptp_canon_eos_resetuilock (params));
+		LOG_ON_PTP_E (ptp_canon_eos_resetuilock (params));
 
 	/* Drain the rest set of the event data */
 	C_PTP (ptp_check_eos_events (params));
@@ -953,6 +971,22 @@ _get_STR(CONFIG_GET_ARGS) {
 }
 
 static int
+_get_STR_ENUMList (CONFIG_GET_ARGS) {
+	int j;
+
+	if (!(dpd->FormFlag & PTP_DPFF_Enumeration))
+		return GP_ERROR;
+	if (dpd->DataType != PTP_DTC_STR)
+		return GP_ERROR;
+	gp_widget_new (GP_WIDGET_RADIO, _(menu->label), widget);
+	gp_widget_set_name (*widget, menu->name);
+	for (j=0;j<dpd->FORM.Enum.NumberOfValues; j++)
+		gp_widget_add_choice (*widget,dpd->FORM.Enum.SupportedValue[j].str);
+	gp_widget_set_value (*widget,dpd->CurrentValue.str);
+	return GP_OK;
+}
+
+static int
 _put_STR(CONFIG_PUT_ARGS) {
 	const char *string;
 
@@ -1032,77 +1066,137 @@ _put_Range_UINT8(CONFIG_PUT_ARGS) {
 static int
 _get_INT(CONFIG_GET_ARGS) {
 	char value[64];
+	float	rvalue = 0;
 
 	switch (dpd->DataType) {
 	case PTP_DTC_UINT32:
-		sprintf (value, "%u", dpd->CurrentValue.u32 );
+		sprintf (value, "%u", dpd->CurrentValue.u32 ); rvalue = dpd->CurrentValue.u32;
 		break;
 	case PTP_DTC_INT32:
-		sprintf (value, "%d", dpd->CurrentValue.i32 );
+		sprintf (value, "%d", dpd->CurrentValue.i32 ); rvalue = dpd->CurrentValue.i32;
 		break;
 	case PTP_DTC_UINT16:
-		sprintf (value, "%u", dpd->CurrentValue.u16 );
+		sprintf (value, "%u", dpd->CurrentValue.u16 ); rvalue = dpd->CurrentValue.u16;
 		break;
 	case PTP_DTC_INT16:
-		sprintf (value, "%d", dpd->CurrentValue.i16 );
+		sprintf (value, "%d", dpd->CurrentValue.i16 ); rvalue = dpd->CurrentValue.i16;
 		break;
 	case PTP_DTC_UINT8:
-		sprintf (value, "%u", dpd->CurrentValue.u8 );
+		sprintf (value, "%u", dpd->CurrentValue.u8 ); rvalue = dpd->CurrentValue.u8;
 		break;
 	case PTP_DTC_INT8:
-		sprintf (value, "%d", dpd->CurrentValue.i8 );
+		sprintf (value, "%d", dpd->CurrentValue.i8 ); rvalue = dpd->CurrentValue.i8;
 		break;
 	default:
 		sprintf (value,_("unexpected datatype %i"),dpd->DataType);
 		return GP_ERROR;
 	}
-	gp_widget_new (GP_WIDGET_TEXT, _(menu->label), widget);
-	gp_widget_set_name (*widget, menu->name);
-	gp_widget_set_value (*widget,value);
+	if (dpd->FormFlag == PTP_DPFF_Enumeration) {
+		gp_widget_new (GP_WIDGET_RADIO, _(menu->label), widget);
+		gp_widget_set_name (*widget, menu->name);
+		gp_widget_set_value (*widget, value); /* text */
+	} else {
+		if (dpd->FormFlag == PTP_DPFF_Range) {
+			gp_widget_new (GP_WIDGET_RANGE, _(menu->label), widget);
+			gp_widget_set_name (*widget, menu->name);
+			gp_widget_set_value (*widget, &rvalue); /* float */
+		} else {
+			gp_widget_new (GP_WIDGET_TEXT, _(menu->label), widget);
+			gp_widget_set_name (*widget, menu->name);
+			gp_widget_set_value (*widget, value); /* text */
+		}
+	}
+
+	if (dpd->FormFlag == PTP_DPFF_Enumeration) {
+		int i;
+
+		for (i=0;i<dpd->FORM.Enum.NumberOfValues;i++) {
+			switch (dpd->DataType) {
+			case PTP_DTC_UINT32:	sprintf (value, "%u", dpd->FORM.Enum.SupportedValue[i].u32 ); break;
+			case PTP_DTC_INT32:	sprintf (value, "%d", dpd->FORM.Enum.SupportedValue[i].i32 ); break;
+			case PTP_DTC_UINT16:	sprintf (value, "%u", dpd->FORM.Enum.SupportedValue[i].u16 ); break;
+			case PTP_DTC_INT16:	sprintf (value, "%d", dpd->FORM.Enum.SupportedValue[i].i16 ); break;
+			case PTP_DTC_UINT8:	sprintf (value, "%u", dpd->FORM.Enum.SupportedValue[i].u8  ); break;
+			case PTP_DTC_INT8:	sprintf (value, "%d", dpd->FORM.Enum.SupportedValue[i].i8  ); break;
+			default: sprintf (value,_("unexpected datatype %i"),dpd->DataType); return GP_ERROR;
+			}
+			gp_widget_add_choice (*widget,value);
+		}
+	}
+	if (dpd->FormFlag == PTP_DPFF_Range) {
+		float b = 0, t = 0, s = 0;
+
+#define X(type,u) case type: b = (float)dpd->FORM.Range.MinimumValue.u; t = (float)dpd->FORM.Range.MaximumValue.u; s = (float)dpd->FORM.Range.StepSize.u; break;
+		switch (dpd->DataType) {
+		X(PTP_DTC_UINT32,u32)
+		X(PTP_DTC_INT32,i32)
+		X(PTP_DTC_UINT16,u16)
+		X(PTP_DTC_INT16,i16)
+		X(PTP_DTC_UINT8,u8)
+		X(PTP_DTC_INT8,i8)
+		}
+#undef X
+		gp_widget_set_range (*widget, b, t, s);
+	}
 	return GP_OK;
 }
 
 static int
 _put_INT(CONFIG_PUT_ARGS) {
-	char *value;
-	unsigned int u;
-	int i;
+	if (dpd->FormFlag == PTP_DPFF_Range) {
+		float f;
 
-	CR (gp_widget_get_value(widget, &value));
+		CR (gp_widget_get_value(widget, &f));
+		switch (dpd->DataType) {
+		case PTP_DTC_UINT32:	propval->u32 = f; break;
+		case PTP_DTC_INT32:	propval->i32 = f; break;
+		case PTP_DTC_UINT16:	propval->u16 = f; break;
+		case PTP_DTC_INT16:	propval->i16 = f; break;
+		case PTP_DTC_UINT8:	propval->u8 = f; break;
+		case PTP_DTC_INT8:	propval->i8 = f; break;
+		}
+		return GP_OK;
+	} else {
+		char *value;
+		unsigned int u;
+		int i;
 
-	switch (dpd->DataType) {
-	case PTP_DTC_UINT32:
-	case PTP_DTC_UINT16:
-	case PTP_DTC_UINT8:
-		C_PARAMS (1 == sscanf (value, "%u", &u ));
-		break;
-	case PTP_DTC_INT32:
-	case PTP_DTC_INT16:
-	case PTP_DTC_INT8:
-		C_PARAMS (1 == sscanf (value, "%d", &i ));
-		break;
-	default:
-		return GP_ERROR;
-	}
-	switch (dpd->DataType) {
-	case PTP_DTC_UINT32:
-		propval->u32 = u;
-		break;
-	case PTP_DTC_INT32:
-		propval->i32 = i;
-		break;
-	case PTP_DTC_UINT16:
-		propval->u16 = u;
-		break;
-	case PTP_DTC_INT16:
-		propval->i16 = i;
-		break;
-	case PTP_DTC_UINT8:
-		propval->u8 = u;
-		break;
-	case PTP_DTC_INT8:
-		propval->i8 = i;
-		break;
+		CR (gp_widget_get_value(widget, &value));
+
+		switch (dpd->DataType) {
+		case PTP_DTC_UINT32:
+		case PTP_DTC_UINT16:
+		case PTP_DTC_UINT8:
+			C_PARAMS (1 == sscanf (value, "%u", &u ));
+			break;
+		case PTP_DTC_INT32:
+		case PTP_DTC_INT16:
+		case PTP_DTC_INT8:
+			C_PARAMS (1 == sscanf (value, "%d", &i ));
+			break;
+		default:
+			return GP_ERROR;
+		}
+		switch (dpd->DataType) {
+		case PTP_DTC_UINT32:
+			propval->u32 = u;
+			break;
+		case PTP_DTC_INT32:
+			propval->i32 = i;
+			break;
+		case PTP_DTC_UINT16:
+			propval->u16 = u;
+			break;
+		case PTP_DTC_INT16:
+			propval->i16 = i;
+			break;
+		case PTP_DTC_UINT8:
+			propval->u8 = u;
+			break;
+		case PTP_DTC_INT8:
+			propval->i8 = i;
+			break;
+		}
 	}
 	return GP_OK;
 }
@@ -1190,7 +1284,7 @@ fallback:										\
 	do {										\
 		origval = dpd.CurrentValue.bits;					\
 		/* if it is a ENUM, the camera will walk through the ENUM */		\
-		if (useenumorder && (dpd.FormFlag & PTP_DPFF_Enumeration)) {		\
+		if (useenumorder && (dpd.FormFlag & PTP_DPFF_Enumeration) && dpd.FORM.Enum.NumberOfValues) {		\
 			int i, posorig = -1, posnew = -1;				\
 											\
 			for (i=0;i<dpd.FORM.Enum.NumberOfValues;i++) {			\
@@ -1209,9 +1303,9 @@ fallback:										\
 			if (posnew == posorig)						\
 				break;							\
 			if (posnew > posorig)						\
-				propval.u8 = 0x01;					\
+				propval.u8 = posnew-posorig;				\
 			else								\
-				propval.u8 = 0xff;					\
+				propval.u8 = 0x100-(posorig-posnew);			\
 		} else {								\
 			if (value == origval)						\
 				break;							\
@@ -1243,6 +1337,15 @@ fallback:										\
 											\
 			time(&end);							\
 		} while (end-start <= 3);						\
+											\
+		if (propval.u8 == 0x01 && dpd.CurrentValue.bits > value) {		\
+			GP_LOG_D ("We overshooted value, maybe not exact match possible. Break!");	\
+			break;								\
+		}									\
+		if (propval.u8 == 0xff && dpd.CurrentValue.bits < value) {		\
+			GP_LOG_D ("We overshooted value, maybe not exact match possible. Break!");	\
+			break;								\
+		}									\
 											\
 		if (dpd.CurrentValue.bits == value) {					\
 			GP_LOG_D ("Value matched!");					\
@@ -1279,7 +1382,7 @@ fallback:										\
 				return GP_ERROR;					\
 			}								\
 		} 									\
-	} while (tries--);/* occasionaly we fail, make an escape path */		\
+	} while (tries--);/* occasionally we fail, make an escape path */		\
 	return GP_OK;									\
 }
 
@@ -1315,6 +1418,7 @@ static struct deviceproptableu16 whitebalance[] = {
 	{ N_("Shade"),			0x8011, PTP_VENDOR_NIKON },
 	{ N_("Color Temperature"),	0x8012, PTP_VENDOR_NIKON },
 	{ N_("Preset"),			0x8013, PTP_VENDOR_NIKON },
+	{ N_("Off"),			0x8014, PTP_VENDOR_NIKON },
 	{ N_("Natural light auto"),	0x8016, PTP_VENDOR_NIKON },
 
 	{ N_("Fluorescent Lamp 1"),	0x8001, PTP_VENDOR_FUJI },
@@ -1401,31 +1505,27 @@ static struct deviceproptableu16 fuji_releasemode[] = {
 };
 GENERIC16TABLE(Fuji_ReleaseMode,fuji_releasemode)
 
-static int
-_get_ImageSize(CONFIG_GET_ARGS) {
-	int j;
-
-	if (!(dpd->FormFlag & PTP_DPFF_Enumeration))
-		return(GP_ERROR);
-	if (dpd->DataType != PTP_DTC_STR)
-		return(GP_ERROR);
-	gp_widget_new (GP_WIDGET_RADIO, _(menu->label), widget);
-	gp_widget_set_name (*widget, menu->name);
-	for (j=0;j<dpd->FORM.Enum.NumberOfValues; j++) {
-		gp_widget_add_choice (*widget,dpd->FORM.Enum.SupportedValue[j].str);
-	}
-	gp_widget_set_value (*widget,dpd->CurrentValue.str);
-	return GP_OK;
-}
-
-static int
-_put_ImageSize(CONFIG_PUT_ARGS) {
-	char *value;
-
-	CR (gp_widget_get_value(widget, &value));
-	C_MEM (propval->str = strdup (value));
-	return(GP_OK);
-}
+static struct deviceproptableu16 fuji_filmsimulation[] = {
+	{ N_("PROVIA/Standard"),            1,	PTP_VENDOR_FUJI },
+	{ N_("Velvia/Vivid"),               2,	PTP_VENDOR_FUJI },
+	{ N_("ASTIA/Soft"),                 3,	PTP_VENDOR_FUJI },
+	{ N_("PRO Neg.Hi"),                 4,	PTP_VENDOR_FUJI },
+	{ N_("PRO Neg.Std"),                5,	PTP_VENDOR_FUJI },
+	{ N_("Black & White"),              6,	PTP_VENDOR_FUJI },
+	{ N_("Black & White+Ye Filter"),    7,	PTP_VENDOR_FUJI },
+	{ N_("Black & White+R Filter"),     8,	PTP_VENDOR_FUJI },
+	{ N_("Black & White+G Filter"),     9,	PTP_VENDOR_FUJI },
+	{ N_("Sepia"),                      10,	PTP_VENDOR_FUJI },
+	{ N_("Classic Chrome"),             11,	PTP_VENDOR_FUJI },
+	{ N_("ACROS"),                      12,	PTP_VENDOR_FUJI },
+	{ N_("ACROS+Ye Filter"),            13,	PTP_VENDOR_FUJI },
+	{ N_("ACROS+R Filter,"),            14,	PTP_VENDOR_FUJI },
+	{ N_("ACROS+G Filter"),             15,	PTP_VENDOR_FUJI },
+	{ N_("ETERNA/Cinema"),              16,	PTP_VENDOR_FUJI },
+	{ N_("Classic Neg"),                17,	PTP_VENDOR_FUJI },
+	{ N_("ETERNA BLEACH BYPASS"),       18,	PTP_VENDOR_FUJI },
+};
+GENERIC16TABLE(Fuji_FilmSimulation,fuji_filmsimulation)
 
 static int
 _get_ExpCompensation(CONFIG_GET_ARGS) {
@@ -1470,14 +1570,26 @@ _put_ExpCompensation(CONFIG_PUT_ARGS) {
 	return GP_OK ;
 }
 
+/* old method, uses stepping */
 static int
 _put_Sony_ExpCompensation(CONFIG_PUT_ARGS) {
 	int ret;
 
 	ret = _put_ExpCompensation(CONFIG_PUT_NAMES);
 	if (ret != GP_OK) return ret;
-	return _put_sony_value_i16 (&camera->pl->params, PTP_DPC_ExposureBiasCompensation, propval->i16, 0);
+	return _put_sony_value_i16 (&camera->pl->params, dpd->DevicePropertyCode, propval->i16, 0);
 }
+
+/* new method, can set directly */
+static int
+_put_Sony_ExpCompensation2(CONFIG_PUT_ARGS) {
+	int ret;
+
+	ret = _put_ExpCompensation(CONFIG_PUT_NAMES);
+	if (ret != GP_OK) return ret;
+	return translate_ptp_result (ptp_sony_setdevicecontrolvaluea (&camera->pl->params, dpd->DevicePropertyCode, propval, PTP_DTC_INT16));
+}
+
 
 static int
 _get_Olympus_ExpCompensation(CONFIG_GET_ARGS) {
@@ -1628,23 +1740,40 @@ _put_Nikon_WBBias(CONFIG_PUT_ARGS)
 	return (GP_OK);
 }
 
+/* This can get type 1 (INT8) , 2 (UINT8) and 4 (UINT16) */
 static int
 _get_Nikon_UWBBias(CONFIG_GET_ARGS) {
 	float	f, t, b, s;
 
-	if (dpd->DataType != PTP_DTC_UINT8)
-		return (GP_ERROR);
 	if (!(dpd->FormFlag & PTP_DPFF_Range))
-		return (GP_ERROR);
+		return GP_ERROR;
 	gp_widget_new (GP_WIDGET_RANGE, _(menu->label), widget);
 	gp_widget_set_name (*widget,menu->name);
-	f = (float)dpd->CurrentValue.u8;
-	b = (float)dpd->FORM.Range.MinimumValue.u8;
-	t = (float)dpd->FORM.Range.MaximumValue.u8;
-	s = (float)dpd->FORM.Range.StepSize.u8;
+	switch (dpd->DataType) {
+	case PTP_DTC_UINT16:
+		f = (float)dpd->CurrentValue.u16;
+		b = (float)dpd->FORM.Range.MinimumValue.u16;
+		t = (float)dpd->FORM.Range.MaximumValue.u16;
+		s = (float)dpd->FORM.Range.StepSize.u16;
+		break;
+	case PTP_DTC_UINT8:
+		f = (float)dpd->CurrentValue.u8;
+		b = (float)dpd->FORM.Range.MinimumValue.u8;
+		t = (float)dpd->FORM.Range.MaximumValue.u8;
+		s = (float)dpd->FORM.Range.StepSize.u8;
+		break;
+	case PTP_DTC_INT8:
+		f = (float)dpd->CurrentValue.i8;
+		b = (float)dpd->FORM.Range.MinimumValue.i8;
+		t = (float)dpd->FORM.Range.MaximumValue.i8;
+		s = (float)dpd->FORM.Range.StepSize.i8;
+		break;
+	default:
+		return GP_ERROR;
+	}
 	gp_widget_set_range (*widget, b, t, s);
 	gp_widget_set_value (*widget, &f);
-	return (GP_OK);
+	return GP_OK;
 }
 
 static int
@@ -1653,8 +1782,20 @@ _put_Nikon_UWBBias(CONFIG_PUT_ARGS)
 	float	f;
 
 	CR (gp_widget_get_value(widget, &f));
-	propval->u8 = (unsigned char)f;
-	return (GP_OK);
+	switch (dpd->DataType) {
+	case PTP_DTC_UINT16:
+		propval->u16 = (unsigned short)f;
+		break;
+	case PTP_DTC_UINT8:
+		propval->u8 = (unsigned char)f;
+		break;
+	case PTP_DTC_INT8:
+		propval->i8 = (char)f;
+		break;
+	default:
+		return GP_ERROR;
+	}
+	return GP_OK;
 }
 
 static int
@@ -2004,14 +2145,14 @@ static struct deviceproptableu16 canon_shutterspeed[] = {
 	{ "bulb",	0x000c,0 },
 	{ "30",		0x0010,0 },
 	{ "25",		0x0013,0 },
-	{ "20",		0x0014,0 }, /* + 1/3 */
+	{ "20.3",	0x0014,0 }, /* + 1/3 */
 	{ "20",		0x0015,0 },
 	{ "15",		0x0018,0 },
 	{ "13",		0x001b,0 },
 	{ "10",		0x001c,0 },
-	{ "10",		0x001d,0 }, /* 10.4 */
+	{ "10.3",	0x001d,0 }, /* 10.4 */
 	{ "8",		0x0020,0 },
-	{ "6",		0x0023,0 }, /* + 1/3 */
+	{ "6.3",	0x0023,0 }, /* + 1/3 */
 	{ "6",		0x0024,0 },
 	{ "5",		0x0025,0 },
 	{ "4",		0x0028,0 },
@@ -2285,6 +2426,9 @@ static struct deviceproptableu16 canon_isospeed[] = {
 	{ "40000",		0x008d, 0 },
 	{ "51200",		0x0090, 0 },
 	{ "102400",		0x0098, 0 },
+	{ "204800",		0x00a0, 0 },
+	{ "409600",		0x00a8, 0 },
+	{ "819200",		0x00b0, 0 },
 	{ N_("Auto"),		0x0000, 0 },
 };
 GENERIC16TABLE(Canon_ISO,canon_isospeed)
@@ -2367,6 +2511,7 @@ GENERIC16TABLE(Canon_EOS_AEB,canon_eos_aeb)
 static struct deviceproptableu16 canon_eos_drive_mode[] = {
 	{ N_("Single"),			0x0000, 0 },
 	{ N_("Continuous"),		0x0001, 0 },
+	{ N_("Video"),			0x0002, 0 },
 	{ N_("Continuous high speed"),	0x0004, 0 },
 	{ N_("Continuous low speed"),	0x0005, 0 },
 	{ N_("Single: Silent shooting"),0x0006, 0 },
@@ -2376,45 +2521,10 @@ static struct deviceproptableu16 canon_eos_drive_mode[] = {
 	{ N_("Super high speed continuous shooting"),		0x0012, 0 },
 	{ N_("Single silent"),		0x0013, 0 },
 	{ N_("Continuous silent"),	0x0014, 0 },
+	{ N_("Silent HS continuous"),	0x0015, 0 },
+	{ N_("Silent LS continuous"),	0x0016, 0 },
 };
 GENERIC16TABLE(Canon_EOS_DriveMode,canon_eos_drive_mode)
-
-static int
-_get_ISO(CONFIG_GET_ARGS) {
-	int i;
-
-	if (!(dpd->FormFlag & PTP_DPFF_Enumeration))
-		return (GP_ERROR);
-	if (dpd->DataType != PTP_DTC_UINT16)
-		return (GP_ERROR);
-
-	gp_widget_new (GP_WIDGET_RADIO, _(menu->label), widget);
-	gp_widget_set_name (*widget, menu->name);
-	for (i=0;i<dpd->FORM.Enum.NumberOfValues; i++) {
-		char	buf[20];
-
-		sprintf(buf,"%d",dpd->FORM.Enum.SupportedValue[i].u16);
-		gp_widget_add_choice (*widget,buf);
-		if (dpd->FORM.Enum.SupportedValue[i].u16 == dpd->CurrentValue.u16)
-			gp_widget_set_value (*widget,buf);
-	}
-	return (GP_OK);
-}
-
-static int
-_put_ISO(CONFIG_PUT_ARGS)
-{
-	char *value;
-	unsigned int	u;
-
-	CR (gp_widget_get_value(widget, &value));
-
-	if (sscanf(value, "%ud", &u)) {
-		propval->u16 = u;
-		return GP_OK;
-	}
-	return GP_ERROR;
-}
 
 static int
 _get_Olympus_ISO(CONFIG_GET_ARGS) {
@@ -2497,43 +2607,6 @@ _put_Olympus_OMD_Bulb(CONFIG_PUT_ARGS)
 }
 
 static int
-_get_ISO32(CONFIG_GET_ARGS) {
-	int i;
-
-	if (!(dpd->FormFlag & PTP_DPFF_Enumeration))
-		return GP_ERROR;
-	if (dpd->DataType != PTP_DTC_UINT32)
-		return GP_ERROR;
-
-	gp_widget_new (GP_WIDGET_RADIO, _(menu->label), widget);
-	gp_widget_set_name (*widget, menu->name);
-	for (i=0;i<dpd->FORM.Enum.NumberOfValues; i++) {
-		char	buf[20];
-
-		sprintf(buf,"%d",dpd->FORM.Enum.SupportedValue[i].u32);
-		gp_widget_add_choice (*widget,buf);
-		if (dpd->FORM.Enum.SupportedValue[i].u32 == dpd->CurrentValue.u32)
-			gp_widget_set_value (*widget,buf);
-	}
-	return GP_OK;
-}
-
-static int
-_put_ISO32(CONFIG_PUT_ARGS)
-{
-	char *value;
-	unsigned int	u;
-
-	CR (gp_widget_get_value(widget, &value));
-
-	if (sscanf(value, "%ud", &u)) {
-		propval->u32 = u;
-		return GP_OK;
-	}
-	return GP_ERROR;
-}
-
-static int
 _get_Sony_ISO(CONFIG_GET_ARGS) {
 	int	i,isset=0;
 	char	buf[50];
@@ -2545,6 +2618,7 @@ _get_Sony_ISO(CONFIG_GET_ARGS) {
 
 	gp_widget_new (GP_WIDGET_RADIO, _(menu->label), widget);
 	gp_widget_set_name (*widget, menu->name);
+
 	for (i=0;i<dpd->FORM.Enum.NumberOfValues; i++) {
 		if (dpd->FORM.Enum.SupportedValue[i].u32 == 0x00ffffffU) {
 			sprintf(buf,_("Auto ISO"));
@@ -2580,6 +2654,7 @@ _get_Sony_ISO(CONFIG_GET_ARGS) {
 	return GP_OK;
 }
 
+/* old method, using stepping */
 static int
 _put_Sony_ISO(CONFIG_PUT_ARGS)
 {
@@ -2605,7 +2680,38 @@ _put_Sony_ISO(CONFIG_PUT_ARGS)
 
 setiso:
 	propval->u32 = u;
-	return _put_sony_value_u32(params, PTP_DPC_SONY_ISO, u, 1);
+
+	return _put_sony_value_u32(params, dpd->DevicePropertyCode, u, 1);
+}
+
+/* new method, can just set the value via setcontroldevicea */
+static int
+_put_Sony_ISO2(CONFIG_PUT_ARGS)
+{
+	char 		*value;
+	uint32_t	u;
+	PTPParams	*params = &(camera->pl->params);
+
+	CR (gp_widget_get_value(widget, &value));
+	if (!strcmp(value,_("Auto ISO"))) {
+		u = 0x00ffffff;
+		goto setiso;
+	}
+	if (!strcmp(value,_("Auto ISO Multi Frame Noise Reduction"))) {
+		u = 0x01ffffff;
+		goto setiso;
+	}
+
+	if (!sscanf(value, "%ud", &u))
+		return GP_ERROR;
+
+	if (strstr(value,_("Multi Frame Noise Reduction")))
+		u |= 0x1000000;
+
+setiso:
+	propval->u32 = u;
+
+	return translate_ptp_result (ptp_sony_setdevicecontrolvaluea(params, dpd->DevicePropertyCode, propval, PTP_DTC_UINT32));
 }
 
 static int
@@ -2895,6 +3001,71 @@ _put_ExpTime(CONFIG_PUT_ARGS)
 	GP_LOG_D ("value %s is %f, closest match was %d",value,val,xval);
 	propval->u32 = xval;
 	return (GP_OK);
+}
+
+static int
+_get_Video_Framerate(CONFIG_GET_ARGS) {
+	char		buf[20];
+
+	if (dpd->DataType != PTP_DTC_UINT32)
+		return GP_ERROR;
+
+	if (dpd->FormFlag == PTP_DPFF_Enumeration) {
+		gp_widget_new (GP_WIDGET_RADIO, _(menu->label), widget);
+		/* value will be set below */
+	} else {
+		if (dpd->FormFlag == PTP_DPFF_Range) {
+			gp_widget_new (GP_WIDGET_RANGE, _(menu->label), widget);
+			float val = dpd->CurrentValue.u32 / 1000000.0;
+			gp_widget_set_value (*widget, &val);
+		} else {
+			gp_widget_new (GP_WIDGET_TEXT, _(menu->label), widget);
+			sprintf (buf, "%0.4f", (1.0*dpd->CurrentValue.u32) / 1000000.0);
+			gp_widget_set_value (*widget, buf);
+		}
+	}
+
+	gp_widget_set_name (*widget, menu->name);
+
+	if (dpd->FormFlag == PTP_DPFF_Enumeration) {
+		int		i;
+
+		for (i=0;i<dpd->FORM.Enum.NumberOfValues; i++) {
+			sprintf (buf,"%0.4f", (1.0*dpd->FORM.Enum.SupportedValue[i].u32)/1000000.0);
+			gp_widget_add_choice (*widget,buf);
+			if (dpd->FORM.Enum.SupportedValue[i].u32 == dpd->CurrentValue.u32)
+				gp_widget_set_value (*widget,buf);
+		}
+	}
+	if (dpd->FormFlag == PTP_DPFF_Range) {
+		float b, t, s;
+
+		b = (1.0*dpd->FORM.Range.MinimumValue.u32) / 1000000.0;
+		t = (1.0*dpd->FORM.Range.MaximumValue.u32) / 1000000.0;
+		s = (1.0*dpd->FORM.Range.StepSize.u32) / 1000000.0;
+		gp_widget_set_range (*widget, b, t, s);
+	}
+	return GP_OK;
+}
+
+static int
+_put_Video_Framerate(CONFIG_PUT_ARGS)
+{
+	float		val;
+	char		*value;
+
+	if (dpd->FormFlag == PTP_DPFF_Range) {
+		CR (gp_widget_get_value (widget, &val));
+	} else {
+		CR (gp_widget_get_value (widget, &value));
+
+		if (!sscanf(value,_("%f"),&val)) {
+			GP_LOG_E ("failed to parse: %s", value);
+			return GP_ERROR;
+		}
+	}
+	propval->u32 = val * 1000000;
+	return GP_OK;
 }
 
 static int
@@ -3234,7 +3405,7 @@ static struct deviceproptableu8 nikon_1_whitebalance[] = {
 	/* values from a J3 */
 	{ N_("Auto"),			0x00, 0 },
 	{ N_("Tungsten"),		0x01, 0 },
-	{ N_("Flourescent"),		0x02, 0 },
+	{ N_("Fluorescent"),		0x02, 0 },
 	{ N_("Daylight"),		0x03, 0 },
 	{ N_("Flash"),			0x04, 0 },
 	{ N_("Cloudy"),			0x05, 0 },
@@ -3253,6 +3424,54 @@ static struct deviceproptableu8 nikon_hdrhighdynamic[] = {
 	{ N_("3 EV"),	3, 0 },
 };
 GENERIC8TABLE(Nikon_HDRHighDynamic,nikon_hdrhighdynamic);
+
+static struct deviceproptableu8 nikon_aebracketstep[] = {
+	{ N_("1/3 EV"),	0, 0 },
+	{ N_("1/2 EV"),	1, 0 },
+	{ N_("2/3 EV"),	2, 0 },
+	{ N_("1 EV"),	3, 0 },
+	{ N_("2 EV"),	4, 0 },
+	{ N_("3 EV"),	5, 0 },
+};
+GENERIC8TABLE(Nikon_AEBracketStep,nikon_aebracketstep);
+
+static struct deviceproptableu8 nikon_wbbracketstep[] = {
+	{ N_("1 EV"),	0, 0 },
+	{ N_("2 EV"),	1, 0 },
+	{ N_("3 EV"),	2, 0 },
+};
+GENERIC8TABLE(Nikon_WBBracketStep,nikon_wbbracketstep);
+
+static struct deviceproptableu8 nikon_adlbracketstep[] = {
+	{ N_("Auto"),		0, 0 },
+	{ N_("Low"),		1, 0 },
+	{ N_("Normal"),		2, 0 },
+	{ N_("High"),		3, 0 },
+	{ N_("Extra high"),	4, 0 },
+};
+GENERIC8TABLE(Nikon_ADLBracketStep,nikon_adlbracketstep);
+
+static struct deviceproptableu8 nikon_bracketpattern[] = {
+	{ N_("2 images (normal and under)"),			0, 0 },
+	{ N_("2 images (normal and over)"),			1, 0 },
+	{ N_("3 images (normal and 2 unders)"),			2, 0 },
+	{ N_("3 images (normal and 2 overs)"),			3, 0 },
+	{ N_("3 images (normal, under and over)"),		4, 0 },
+	{ N_("5 images (normal, 2 unders and 2 overs)"),	5, 0 },
+	{ N_("7 images (normal, 3 unders and 3 overs)"),	6, 0 },
+	{ N_("9 images (normal, 4 unders and 4 overs)"),	7, 0 },
+	{ N_("0 image"),					8, 0 },
+};
+GENERIC8TABLE(Nikon_BracketPattern,nikon_bracketpattern);
+
+static struct deviceproptableu8 nikon_adlbracketpattern[] = {
+	{ N_("2 shots (Off -> User setting)"),				0, 0 },
+	{ N_("3 shots (Off -> Low -> User setting)"),			1, 0 },
+	{ N_("4 shots (Off -> Low -> Normal -> High)"),			2, 0 },
+	{ N_("5 shots (Off -> Low -> Normal -> High -> Extra High)"),	3, 0 },
+	{ N_("0 image"),						4, 0 },
+};
+GENERIC8TABLE(Nikon_ADLBracketPattern,nikon_adlbracketpattern);
 
 static struct deviceproptableu8 nikon_hdrsmoothing[] = {
 	{ N_("Auto"),		3, 0 },
@@ -3638,6 +3857,60 @@ _put_FocalLength(CONFIG_PUT_ARGS) {
 		}
 	}
 	propval->u32 = newval;
+	return GP_OK;
+}
+
+static int
+_get_VideoFormat(CONFIG_GET_ARGS) {
+	int i, valset = 0;
+	char buf[200];
+
+	if (!(dpd->FormFlag & PTP_DPFF_Enumeration))
+		return GP_ERROR;
+
+	if (dpd->DataType != PTP_DTC_UINT32)
+		return GP_ERROR;
+
+	gp_widget_new (GP_WIDGET_RADIO, _(menu->label), widget);
+	gp_widget_set_name (*widget, menu->name);
+
+	/* We use FOURCC values, which should be 4 characters always */
+
+	for (i = 0; i<dpd->FORM.Enum.NumberOfValues; i++) {
+		sprintf (buf, "%c%c%c%c",
+			(dpd->FORM.Enum.SupportedValue[i].u32     )  & 0xff,
+			(dpd->FORM.Enum.SupportedValue[i].u32 >> 8)  & 0xff,
+			(dpd->FORM.Enum.SupportedValue[i].u32 >> 16) & 0xff,
+			(dpd->FORM.Enum.SupportedValue[i].u32 >> 24) & 0xff
+		);
+		gp_widget_add_choice (*widget,buf);
+		if (dpd->CurrentValue.u32 == dpd->FORM.Enum.SupportedValue[i].u32) {
+			gp_widget_set_value (*widget, buf);
+			valset = 1;
+		}
+	}
+	if (!valset) {
+		sprintf (buf, "%c%c%c%c",
+			(dpd->CurrentValue.u32     )  & 0xff,
+			(dpd->CurrentValue.u32 >> 8)  & 0xff,
+			(dpd->CurrentValue.u32 >> 16) & 0xff,
+			(dpd->CurrentValue.u32 >> 24) & 0xff
+		);
+		sprintf (buf, _("%d mm"), dpd->CurrentValue.u16);
+		gp_widget_set_value (*widget, buf);
+	}
+	return GP_OK;
+}
+
+static int
+_put_VideoFormat(CONFIG_PUT_ARGS) {
+	const unsigned char *value_str;
+
+	CR (gp_widget_get_value (widget, &value_str));
+	if (strlen((char*)value_str) < 4)
+		return GP_ERROR_BAD_PARAMETERS;
+	/* we could check if we have it in the ENUM */
+	propval->u32 = value_str[0] | (value_str[1] << 8) | (value_str[2] << 16) | (value_str[3] << 24);
 	return GP_OK;
 }
 
@@ -4036,17 +4309,35 @@ static struct sonyshutter {
 
 static int
 _get_Sony_ShutterSpeed(CONFIG_GET_ARGS) {
-	int x,y;
-	char buf[20];
+	int			x,y;
+	char			buf[20];
+	PTPParams		*params = &(camera->pl->params);
+	GPContext 		*context = ((PTPData *) params->data)->context;
 
 	if (dpd->DataType != PTP_DTC_UINT32)
 		return GP_ERROR;
 
+	if (have_prop (camera, PTP_VENDOR_SONY, PTP_DPC_SONY_ShutterSpeed2))
+		C_PTP_REP (ptp_generic_getdevicepropdesc (params, PTP_DPC_SONY_ShutterSpeed2, dpd));
+
 	gp_widget_new (GP_WIDGET_RADIO, _(menu->label), widget);
 	gp_widget_set_name (*widget, menu->name);
 
+	/* new style has an ENUM again */
 	if (dpd->FormFlag & PTP_DPFF_Enumeration) {
-		GP_LOG_E("there is a enum, support it! ... report to gphoto-devel list!\n");
+		unsigned int i;
+
+		for (i=0;i<dpd->FORM.Enum.NumberOfValues;i++) {
+			x = dpd->FORM.Enum.SupportedValue[i].u32 >> 16;
+			y = dpd->FORM.Enum.SupportedValue[i].u32 & 0xffff;
+
+			if (y == 1)
+				sprintf (buf, "%d",x);
+			else
+				sprintf (buf, "%d/%d",x,y);
+			gp_widget_add_choice (*widget, buf);
+		}
+		gp_widget_add_choice (*widget, _("Bulb"));
 	} else {
 		unsigned int i;
 		/* use our static table */
@@ -4078,14 +4369,15 @@ _get_Sony_ShutterSpeed(CONFIG_GET_ARGS) {
 
 static int
 _put_Sony_ShutterSpeed(CONFIG_PUT_ARGS) {
-	int			x,y,a,b;
+	int			x,y,a,b,direction,position_current,position_new;
 	const char		*val;
-	float 			old,new;
+	float 			old,new,current;
 	PTPPropertyValue	value;
 	uint32_t		new32, origval;
 	PTPParams		*params = &(camera->pl->params);
 	GPContext 		*context = ((PTPData *) params->data)->context;
 	time_t			start,end;
+	unsigned int		i;
 
 	CR (gp_widget_get_value (widget, &val));
 
@@ -4096,6 +4388,7 @@ _put_Sony_ShutterSpeed(CONFIG_PUT_ARGS) {
 		y = dpd->CurrentValue.u32&0xffff;
 	}
 	old = ((float)x)/(float)y;
+	current = old;
 
 	if (!strcmp(val,_("Bulb"))) {
 		new32 = 0;
@@ -4110,18 +4403,64 @@ _put_Sony_ShutterSpeed(CONFIG_PUT_ARGS) {
 		}
 		new32 = (x<<16)|y;
 	}
+	/* new style */
+	if (have_prop (camera, PTP_VENDOR_SONY, PTP_DPC_SONY_ShutterSpeed2)) {
+		propval->u32 = new32;
+		return translate_ptp_result (ptp_sony_setdevicecontrolvaluea(params, PTP_DPC_SONY_ShutterSpeed2, propval, PTP_DTC_UINT32));
+	}
+	/* old style uses stepping */
+
 	new = ((float)x)/(float)y;
+	
+	if (old > new) {
+		value.u8 = 0x01;
+		direction = 1;
+	}
+	else {
+		value.u8 = 0xff;
+		direction = -1;
+	}
+	
+	if (direction == 1) {	
+		for (i=0;i<sizeof(sony_shuttertable)/sizeof(sony_shuttertable[0]);i++) {
+			a = sony_shuttertable[i].dividend;
+			b = sony_shuttertable[i].divisor;
+			position_new = i;
+			if (new >= ((float)a)/(float)b)
+				break;
+		}
+	} else {
+		for (i=sizeof(sony_shuttertable)/sizeof(sony_shuttertable[0])-1;i>=0;i--) {
+			a = sony_shuttertable[i].dividend;
+			b = sony_shuttertable[i].divisor;
+			position_new = i;
+			if (new <= ((float)a)/(float)b)
+				break;
+		}
+	}
+		
 	do {
 		origval = dpd->CurrentValue.u32;
 		if (old == new)
 			break;
-		if (old > new)
-			value.u8 = 0x01;
+
+		for (i=0;i<sizeof(sony_shuttertable)/sizeof(sony_shuttertable[0]);i++) {
+			a = sony_shuttertable[i].dividend;
+			b = sony_shuttertable[i].divisor;
+			position_current = i;
+			if (current >= ((float)a)/(float)b)
+				break;
+		}
+		
+		// Calculating jump width 
+		if (direction > 0)
+			value.u8 = 0x00 + position_new - position_current;
 		else
-			value.u8 = 0xff;
+			value.u8 = 0x100 + position_new - position_current;
+			
 		a = dpd->CurrentValue.u32>>16;
 		b = dpd->CurrentValue.u32&0xffff;
-		C_PTP_REP (ptp_sony_setdevicecontrolvalueb (params, PTP_DPC_SONY_ShutterSpeed, &value, PTP_DTC_UINT8 ));
+		C_PTP_REP (ptp_sony_setdevicecontrolvalueb (params, dpd->DevicePropertyCode, &value, PTP_DTC_UINT8 ));
 
 		GP_LOG_D ("shutterspeed value is (0x%x vs target 0x%x)", origval, new32);
 
@@ -4129,7 +4468,7 @@ _put_Sony_ShutterSpeed(CONFIG_PUT_ARGS) {
 		time(&start);
 		do {
 			C_PTP_REP (ptp_sony_getalldevicepropdesc (params));
-			C_PTP_REP (ptp_generic_getdevicepropdesc (params, PTP_DPC_SONY_ShutterSpeed, dpd));
+			C_PTP_REP (ptp_generic_getdevicepropdesc (params, dpd->DevicePropertyCode, dpd));
 
 			if (dpd->CurrentValue.u32 == new32) {
 				GP_LOG_D ("Value matched!");
@@ -4137,6 +4476,8 @@ _put_Sony_ShutterSpeed(CONFIG_PUT_ARGS) {
 			}
 			a = dpd->CurrentValue.u32>>16;
 			b = dpd->CurrentValue.u32&0xffff;
+			current = ((float)a)/((float)b);
+			
 			if ((a*y != 0) && (a*y == b*x)) {
 				GP_LOG_D ("Value matched via math(tm) %d/%d == %d/%d!",x,y,a,b);
 				break;
@@ -4151,6 +4492,15 @@ _put_Sony_ShutterSpeed(CONFIG_PUT_ARGS) {
 
 			time(&end);
 		} while (end-start <= 3);
+		
+		if (direction > 0 && current <= new) {
+			GP_LOG_D ("Overshooted value, maybe choice not available!");
+			break;
+		}
+		if (direction < 0 && current >= new) {
+			GP_LOG_D ("Overshooted value, maybe choice not available!");
+			break;
+		}
 
 		if (dpd->CurrentValue.u32 == new32) {
 			GP_LOG_D ("Value matched!");
@@ -4168,7 +4518,6 @@ _put_Sony_ShutterSpeed(CONFIG_PUT_ARGS) {
 	propval->u32 = new;
 	return GP_OK;
 }
-
 
 static int
 _get_Nikon_FocalLength(CONFIG_GET_ARGS) {
@@ -4246,9 +4595,9 @@ _get_Nikon_FlashExposureCompensation(CONFIG_GET_ARGS) {
 	float value_float;
 
 	if (!(dpd->FormFlag & PTP_DPFF_Range))
-		return (GP_ERROR);
+		return GP_ERROR;
 	if (dpd->DataType != PTP_DTC_INT8)
-		return (GP_ERROR);
+		return GP_ERROR;
 	gp_widget_new (GP_WIDGET_RANGE, _(menu->label), widget);
 	gp_widget_set_name (*widget, menu->name);
 	gp_widget_set_range (*widget,
@@ -4258,7 +4607,7 @@ _get_Nikon_FlashExposureCompensation(CONFIG_GET_ARGS) {
 	);
 	value_float = dpd->CurrentValue.i8/6.0;
 	gp_widget_set_value (*widget, &value_float);
-	return (GP_OK);
+	return GP_OK;
 }
 
 static int
@@ -4335,20 +4684,34 @@ static struct deviceproptableu8 nikon_liveviewaf[] = {
 	{ N_("Wide-area AF"),		1, 0 },
 	{ N_("Normal-area AF"),		2, 0 },
 	{ N_("Subject-tracking AF"),	3, 0 },
+	{ N_("Spot-area AF"),		4, 0 },
 };
 GENERIC8TABLE(Nikon_LiveViewAFU,nikon_liveviewaf)
+
+static struct deviceproptableu8 nikon_liveviewimagezoomratio[] = {
+	{ N_("Entire Display"),	0, 0 },
+	{ N_("25%"),		2, 0 },
+	{ N_("50%"),		4, 0 },
+	{ N_("100%"),		6, 0 },
+	{ N_("200%"),		7, 0 },
+};
+GENERIC8TABLE(Nikon_LiveViewImageZoomRatio,nikon_liveviewimagezoomratio)
+
 static struct deviceproptablei8 nikon_liveviewafi[] = {
 	{ N_("Face-priority AF"),	0, 0 },
 	{ N_("Wide-area AF"),		1, 0 },
 	{ N_("Normal-area AF"),		2, 0 },
 	{ N_("Subject-tracking AF"),	3, 0 },
+	{ N_("Spot-area AF"),		4, 0 },
 };
 GENERICI8TABLE(Nikon_LiveViewAFI,nikon_liveviewafi)
 
 static struct deviceproptableu8 nikon_liveviewaffocus[] = {
-	{ N_("Single-servo AF"),	0, 0 },
-	{ N_("Full-time-servo AF"),	2, 0 },
-	{ N_("Manual Focus"),		4, 0 },
+	{ N_("Single-servo AF"),		0, 0 },
+	{ N_("Continuous-servo AF"),		1, 0 },
+	{ N_("Full-time-servo AF"),		2, 0 },
+	{ N_("Manual Focus (fixed)"),		3, 0 },
+	{ N_("Manual Focus (selection)"),	4, 0 },
 };
 GENERIC8TABLE(Nikon_LiveViewAFFocus,nikon_liveviewaffocus)
 
@@ -4489,17 +4852,92 @@ static struct deviceproptablei16 fuji_shutterspeed[] = {
 };
 GENERICI16TABLE(Fuji_ShutterSpeed,fuji_shutterspeed)
 
+static struct deviceproptableu32 fuji_new_shutterspeed[] = {
+	{ N_("bulb"),	0xffffffff, 0 },
+	{ "60m",	64000180, 0 },
+	{ "30m",	64000150, 0 },
+	{ "15m",	64000120, 0 },
+	{ "8m",		64000090, 0 },
+	{ "4m",		64000060, 0 },
+	{ "2m",		64000030, 0 },
+	{ "60s",	64000000, 0 },
+	{ "50s",	50796833, 0 },
+	{ "40s",	40317473, 0 },
+	{ "30s",	32000000, 0 },
+	{ "25s",	25398416, 0 },
+	{ "20s",	20158736, 0 },
+	{ "15s",	16000000, 0 },
+	{ "13s",	12699208, 0 },
+	{ "10s",	10079368, 0 },
+	{ "8s",		8000000, 0 },
+	{ "6s",		6349604, 0 },
+	{ "5s",		5039684, 0 },
+	{ "4s",		4000000, 0 },
+	{ "3s",		3174802, 0 },
+	{ "2.5s",	2519842, 0 },
+	{ "2s",		2000000, 0 },
+	{ "1.6s",	1587401, 0 },
+	{ "1.3s",	1259921, 0 },
+	{ "1s",		1000000, 0 },
+	{ "0.8s",	793700, 0 },
+	{ "0.6s",	629960, 0 },
+	{ "1/2",	500000, 0 },
+	{ "0.4s",	396850, 0 },
+	{ "1/3",	314980, 0 },
+	{ "1/4",	250000, 0 },
+	{ "1/5",	198425, 0 },
+	{ "1/6",	157490, 0 },
+	{ "1/8",	125000, 0 },
+	{ "1/10",	99212, 0 },
+	{ "1/13",	78745, 0 },
+	{ "1/15",	62500, 0 },
+	{ "1/20",	49606, 0 },
+	{ "1/25",	39372, 0 },
+	{ "1/30",	31250, 0 },
+	{ "1/40",	24803, 0 },
+	{ "1/50",	19686, 0 },
+	{ "1/60",	15625, 0 },
+	{ "1/80",	12401, 0 },
+	{ "1/100",	9843, 0 },
+	{ "1/125",	7812, 0 },
+	{ "1/160",	6200, 0 },
+	{ "1/200",	4921, 0 },
+	{ "1/250",	3906, 0 },
+	{ "1/320",	3100, 0 },
+	{ "1/400",	2460, 0 },
+	{ "1/500",	1953, 0 },
+	{ "1/640",	1550, 0 },
+	{ "1/800",	1230, 0 },
+	{ "1/1000",	976, 0 },
+	{ "1/1250",	775, 0 },
+	{ "1/1600",	615, 0 },
+	{ "1/2000",	488, 0 },
+	{ "1/2500",	387, 0 },
+	{ "1/3200",	307, 0 },
+	{ "1/4000",	244, 0 },
+	{ "1/5000",	193, 0 },
+	{ "1/6400",	153, 0 },
+	{ "1/8000",	122, 0 },
+	{ "1/10000",	96, 0 },
+	{ "1/13000",	76, 0 },
+	{ "1/16000",	61, 0 },
+	{ "1/20000",	48, 0 },
+	{ "1/25000",	38, 0 },
+	{ "1/32000",	30, 0 },
+};
+GENERIC32TABLE(Fuji_New_ShutterSpeed,fuji_new_shutterspeed)
+
 static struct deviceproptableu8 nikon_remotetimeout[] = {
-	{ N_("1 minute"),	0x00, 0 },
-	{ N_("5 minutes"),	0x01, 0 },
-	{ N_("10 minutes"),	0x02, 0 },
-	{ N_("15 minutes"),	0x03, 0 },
+	{ N_("1 minute"),	0x00,	0 },
+	{ N_("5 minutes"),	0x01,	0 },
+	{ N_("10 minutes"),	0x02,	0 },
+	{ N_("15 minutes"),	0x03,	0 },
 };
 GENERIC8TABLE(Nikon_RemoteTimeout,nikon_remotetimeout)
 
 static struct deviceproptableu8 nikon_optimizeimage[] = {
-	{ N_("Normal"),		0x00, 0 },
-	{ N_("Vivid"),		0x01, 0 },
+	{ N_("Normal"),		0x00,	0 },
+	{ N_("Vivid"),		0x01,	0 },
 	{ N_("Sharper"),	0x02, 0 },
 	{ N_("Softer"),		0x03, 0 },
 	{ N_("Direct Print"),	0x04, 0 },
@@ -4629,12 +5067,11 @@ static struct deviceproptableu8 canon_whitebalance[] = {
 	{ N_("Custom Whitebalance PC-2"),	11, 0 },
 	{ N_("Custom Whitebalance PC-3"),	12, 0 },
 	{ N_("Missing Number"),		13, 0 },
-	/*{ N_("Flourescent H"),		14, 0 }, ... dup? */
+	/*{ N_("Fluorescent H"),		14, 0 }, ... dup? */
 };
 GENERIC8TABLE(Canon_WhiteBalance,canon_whitebalance)
 
-/* confirmed against EOS 450D - Marcus */
-/* I suspect every EOS uses a different table :( */
+/* check against SDK */
 static struct deviceproptableu8 canon_eos_whitebalance[] = {
 	{ N_("Auto"),		0, 0 },
 	{ N_("Daylight"),	1, 0 },
@@ -4645,13 +5082,16 @@ static struct deviceproptableu8 canon_eos_whitebalance[] = {
 	{ N_("Manual"),		6, 0 },
 	{"Unknown 7",		7, 0 },
 	{ N_("Shadow"),		8, 0 },
-	{ N_("Color Temperature"),9, 0 }, /* from eos 40d / 5D Mark II dump */
-	{ "Unknown 10",		10, 0 },
-	{ "Unknown 11",		11, 0 },
-	{ N_("Custom WB 2"),	15, 0 },
-	{ N_("Custom WB 3"),	16, 0 },
-	{ N_("Custom WB 4"),	18, 0 },
-	{ N_("Custom WB 5"),	19, 0 },
+	{ N_("Color Temperature"),9, 0 },
+	{ N_("Custom Whitebalance: PC-1"),		10, 0 },
+	{ N_("Custom Whitebalance: PC-2"),		11, 0 },
+	{ N_("Custom Whitebalance: PC-3"),		12, 0 },
+	{ N_("Manual 2"),	15, 0 },
+	{ N_("Manual 3"),	16, 0 },
+	{ N_("Manual 4"),	18, 0 },
+	{ N_("Manual 5"),	19, 0 },
+	{ N_("Custom Whitebalance: PC-4"),		20, 0 },
+	{ N_("Custom Whitebalance: PC-5"),		21, 0 },
 	{ N_("AWB White"),	23, 0 },
 };
 GENERIC8TABLE(Canon_EOS_WhiteBalance,canon_eos_whitebalance)
@@ -4745,6 +5185,16 @@ static struct deviceproptableu16 canon_photoeffect[] = {
 };
 GENERIC16TABLE(Canon_PhotoEffect,canon_photoeffect)
 
+
+/* FIXME: actually uint32 in SDK doc? also non-standard type in debuglogs */
+static struct deviceproptableu16 canon_bracketmode[] = {
+	{ N_("AE bracket"),	1, 0 },
+	{ N_("ISO bracket"),	2, 0 },
+	{ N_("WB bracket"),	4, 0 },
+	{ N_("FE bracket"),	8, 0 },
+	{ N_("Bracket off"),	0xffff, 0 },
+};
+GENERIC16TABLE(Canon_BracketMode,canon_bracketmode)
 
 static struct deviceproptableu16 canon_aperture[] = {
 	{ N_("implicit auto"),	0x0, 0 },
@@ -4902,7 +5352,7 @@ static struct deviceproptableu8 nikon_lensid[] = {
 	{"AF-S Nikkor 35mm 1:1.8G DX", 			159, 0},
 	{"Sigma EX 30mm 1:1.4 DC HSM",			248, 0}, /* from mge */
 };
-GENERIC8TABLE(Nikon_LensID,nikon_lensid)
+GENERIC8TABLE(Nikon_LensID,nikon_lensid) /* FIXME: seen UINT8 and UINT16 types now */
 
 static struct deviceproptableu8 nikon_microphone[] = {
 	{N_("Auto sensitivity"),	0, 0},
@@ -5162,7 +5612,64 @@ static struct deviceproptableu8 nikon_d3s_padvpvalue[] = {
 };
 GENERIC8TABLE(Nikon_D3s_PADVPValue,nikon_d3s_padvpvalue)
 
-static struct deviceproptablei8 nikon_d90_activedlighting[] = {
+static struct deviceproptableu8 nikon_z6_padvpvalue[] = {
+	{ "1/4000",	0x00, 0 },
+	{ "1/3200",	0x01, 0 },
+	{ "1/2500",	0x02, 0 },
+	{ "1/2000",	0x03, 0 },
+	{ "1/1600",	0x04, 0 },
+	{ "1/1250",	0x05, 0 },
+	{ "1/1000",	0x06, 0 },
+	{ "1/800",	0x07, 0 },
+	{ "1/640",	0x08, 0 },
+	{ "1/500",	0x09, 0 },
+	{ "1/400",	0x0a, 0 },
+	{ "1/320",	0x0b, 0 },
+	{ "1/250",	0x0c, 0 },
+	{ "1/200",	0x0d, 0 },
+	{ "1/160",	0x0e, 0 },
+	{ "1/125",	0x0f, 0 },
+	{ "1/100",	0x10, 0 },
+	{ "1/80",	0x11, 0 },
+	{ "1/60",	0x12, 0 },
+	{ "1/50",	0x13, 0 },
+	{ "1/40",	0x14, 0 },
+	{ "1/30",	0x15, 0 },
+	{ "1/25",	0x16, 0 },
+	{ "1/20",	0x17, 0 },
+	{ "1/15",	0x18, 0 },
+	{ "1/13",	0x19, 0 },
+	{ "1/10",	0x1a, 0 },
+	{ "1/8",	0x1b, 0 },
+	{ "1/6",	0x1c, 0 },
+	{ "1/5",	0x1d, 0 },
+	{ "1/4",	0x1e, 0 },
+	{ "1/3",	0x1f, 0 },
+	{ "1/2.5",	0x20, 0 },
+	{ "1/2",	0x21, 0 },
+	{ "1/1.6",	0x22, 0 },
+	{ "1/1.3",	0x23, 0 },
+	{ "1",		0x24, 0 },
+	{ "1.3",	0x25, 0 },
+	{ "1.6",	0x26, 0 },
+	{ "2",		0x27, 0 },
+	{ "2.5",	0x28, 0 },
+	{ "3",		0x29, 0 },
+	{ "4",		0x2a, 0 },
+	{ "5",		0x2b, 0 },
+	{ "6",		0x2c, 0 },
+	{ "8",		0x2d, 0 },
+	{ "10",		0x2e, 0 },
+	{ "13",		0x2f, 0 },
+	{ "15",		0x30, 0 },
+	{ "20",		0x31, 0 },
+	{ "25",		0x32, 0 },
+	{ "30",		0x33, 0 },
+	{ N_("auto"),	0x34, 0 },
+};
+GENERIC8TABLE(Nikon_Z6_PADVPValue,nikon_z6_padvpvalue)
+
+static struct deviceproptableu8 nikon_d90_activedlighting[] = {
 	{ N_("Extra high"), 0x00,   0 },
 	{ N_("High"),       0x01,   0 },
 	{ N_("Normal"),     0x02,   0 },
@@ -5170,15 +5677,15 @@ static struct deviceproptablei8 nikon_d90_activedlighting[] = {
 	{ N_("Off"),        0x04,   0 },
 	{ N_("Auto"),       0x05,   0 },
 };
-GENERICI8TABLE(Nikon_D90_ActiveDLighting,nikon_d90_activedlighting)
+GENERIC8TABLE(Nikon_D90_ActiveDLighting,nikon_d90_activedlighting)
 
 static struct deviceproptablei8 nikon_d850_activedlighting[] = {
-	{ N_("Auto"), 		0x00,   0 },
-	{ N_("Off"),       	0x01,   0 },
-	{ N_("Low"),     	0x02,   0 },
-	{ N_("Normal"),     0x03,   0 },
-	{ N_("High"),       0x04,   0 },
-	{ N_("Extra high"), 0x05,   0 },
+	{ N_("Auto"),		0x00,   0 },
+	{ N_("Off"),		0x01,   0 },
+	{ N_("Low"),		0x02,   0 },
+	{ N_("Normal"),		0x03,   0 },
+	{ N_("High"),		0x04,   0 },
+	{ N_("Extra high"),	0x05,   0 },
 };
 GENERICI8TABLE(Nikon_D850_ActiveDLighting,nikon_d850_activedlighting)
 
@@ -5241,6 +5748,23 @@ static struct deviceproptableu8 nikon_d850_compression[] = {
 	{ N_("NEF+Fine*"),   0x0D, PTP_VENDOR_NIKON },
 };
 GENERIC8TABLE(Nikon_D850_Compression,nikon_d850_compression)
+
+static struct deviceproptableu8 nikon_d7500_compression[] = {
+	{ N_("JPEG Basic"),  0x00, PTP_VENDOR_NIKON },
+	{ N_("JPEG Basic*"), 0x01, PTP_VENDOR_NIKON },
+	{ N_("JPEG Normal"), 0x02, PTP_VENDOR_NIKON },
+	{ N_("JPEG Normal*"),   0x03, PTP_VENDOR_NIKON },
+	{ N_("JPEG Fine"),   0x04, PTP_VENDOR_NIKON },
+	{ N_("JPEG Fine*"),   0x05, PTP_VENDOR_NIKON },
+	{ N_("NEF (Raw)"),   0x07, PTP_VENDOR_NIKON },
+	{ N_("NEF+Basic"),   0x08, PTP_VENDOR_NIKON },
+	{ N_("NEF+Basic*"),   0x09, PTP_VENDOR_NIKON },
+	{ N_("NEF+Normal"),   0x0A, PTP_VENDOR_NIKON },
+	{ N_("NEF+Normal*"),   0x0B, PTP_VENDOR_NIKON },
+	{ N_("NEF+Fine"),   0x0C, PTP_VENDOR_NIKON },
+	{ N_("NEF+Fine*"),   0x0D, PTP_VENDOR_NIKON },
+};
+GENERIC8TABLE(Nikon_D7500_Compression,nikon_d7500_compression)
 
 static struct deviceproptableu8 compressionsetting[] = {
 	{ N_("JPEG Basic"),	0x00, PTP_VENDOR_NIKON },
@@ -5305,13 +5829,13 @@ static struct deviceproptableu16 canon_eos_highisonr[] = {
 
 GENERIC16TABLE(Canon_EOS_HighIsoNr,canon_eos_highisonr)
 
-static struct deviceproptablei8 nikon_d90_highisonr[] = {
+static struct deviceproptableu8 nikon_d90_highisonr[] = {
 	{ N_("Off"),	0, 0 },
 	{ N_("Low"),	1, 0 },
 	{ N_("Normal"),	2, 0 },
 	{ N_("High"),	3, 0 },
 };
-GENERICI8TABLE(Nikon_D90_HighISONR,nikon_d90_highisonr)
+GENERIC8TABLE(Nikon_D90_HighISONR,nikon_d90_highisonr)
 
 static struct deviceproptableu8 nikon_1_highisonr[] = {
 	{ N_("On"),	0, 0 },
@@ -5522,34 +6046,27 @@ static struct deviceproptableu8 nikon_menus_and_playback[] = {
 };
 GENERIC8TABLE(Nikon_MenusAndPlayback,nikon_menus_and_playback)
 
+static struct deviceproptableu8 nikon_vignettecorrection[] = {
+	{ N_("High"),		0x0, 0 },
+	{ N_("Normal"),		0x1, 0 },
+	{ N_("Moderate"),	0x2, 0 },
+	{ N_("Off"),		0x3, 0 },
+};
+GENERIC8TABLE(Nikon_VignetteCorrection,nikon_vignettecorrection)
 
-static int
-_get_BurstNumber(CONFIG_GET_ARGS) {
-	float value_float , start=0.0, end=0.0, step=0.0;
+static struct deviceproptableu8 nikon_hdmidatadepth[] = {
+	{ "8",		0x0, 0 },
+	{ "10",		0x1, 0 },
+};
+GENERIC8TABLE(Nikon_HDMIDataDepth,nikon_hdmidatadepth)
 
-	if (!(dpd->FormFlag & PTP_DPFF_Range))
-		return (GP_ERROR);
-	if (dpd->DataType != PTP_DTC_UINT16)
-		return (GP_ERROR);
-	gp_widget_new (GP_WIDGET_RANGE, _(menu->label), widget);
-	gp_widget_set_name (*widget, menu->name);
-	start = dpd->FORM.Range.MinimumValue.u16;
-	end = dpd->FORM.Range.MaximumValue.u16;
-	step = dpd->FORM.Range.StepSize.u16;
-	gp_widget_set_range (*widget, start, end, step);
-	value_float = dpd->CurrentValue.u16;
-	gp_widget_set_value (*widget, &value_float);
-	return (GP_OK);
-}
-
-static int
-_put_BurstNumber(CONFIG_PUT_ARGS) {
-	float val;
-
-	CR (gp_widget_get_value(widget, &val));
-	propval->u16 = val;
-	return GP_OK;
-}
+static struct deviceproptableu8 nikon_facedetection[] = {
+	{ N_("Off"),				0x0, 0 },
+	{ N_("Face detection"),			0x1, 0 },
+	{ N_("Face and pupil detection"),	0x2, 0 },
+	{ N_("Animal detection"),		0x3, 0 },
+};
+GENERIC8TABLE(Nikon_FaceDetection,nikon_facedetection)
 
 static int
 _get_BatteryLevel(CONFIG_GET_ARGS) {
@@ -5915,14 +6432,14 @@ _put_Nikon_ControlMode(CONFIG_PUT_ARGS) {
 	char*		val;
 	unsigned int	xval = 0;
 
-	if (!ptp_operation_issupported(&camera->pl->params, PTP_OC_NIKON_SetControlMode))
+	if (!ptp_operation_issupported(&camera->pl->params, PTP_OC_NIKON_ChangeCameraMode))
 		return GP_ERROR_NOT_SUPPORTED;
 	gp_widget_get_value(widget, &val);
 
 	if (!sscanf(val,"%d",&xval))	
 		return GP_ERROR;
 
-	C_PTP (ptp_nikon_setcontrolmode (&camera->pl->params, xval));
+	C_PTP (ptp_nikon_changecameramode (&camera->pl->params, xval));
 	return GP_OK;
 }
 
@@ -5952,7 +6469,7 @@ _get_Canon_EOS_RemoteRelease(CONFIG_GET_ARGS) {
 /* On EOS 7D:
  * 9128 1 0  (half?)
  * 9128 2 0  (full?)
- * paramters: press mode, ? afmode ? SDK seems to suggest 1==NonAF, 0 == AF
+ * parameters: press mode, ? afmode ? SDK seems to suggest 1==NonAF, 0 == AF
  */
 
 static int
@@ -5964,7 +6481,7 @@ _put_Canon_EOS_RemoteRelease(CONFIG_PUT_ARGS) {
 	if (!ptp_operation_issupported(params, PTP_OC_CANON_EOS_RemoteReleaseOn))
 		return (GP_ERROR_NOT_SUPPORTED);
 
-	/* If someone has set the capture target inbetween */
+	/* If someone has set the capture target between */
 	CR (camera_canon_eos_update_capture_target( camera, context, -1 ));
 
 	gp_widget_get_value(widget, &val);
@@ -6467,8 +6984,8 @@ _put_Canon_EOS_ViewFinder(CONFIG_PUT_ARGS) {
 	else
 		xval.u16 = 0;
 	C_PTP_MSG (ptp_canon_eos_setdevicepropvalue (params, PTP_DPC_CANON_EOS_EVFOutputDevice, &xval, PTP_DTC_UINT16),
-		   "ptp2_eos_viewfinder enable", "setval of evf outputmode to %d failed", xval.u32);
-	return GP_OK;
+		   "ptp2_eos_viewfinder enable: failed to set evf outputmode to %d", xval.u16);
+        return GP_OK;
 }
 
 static int
@@ -6529,6 +7046,24 @@ _put_Nikon_ViewFinder(CONFIG_PUT_ARGS) {
 
 		if (LOG_ON_PTP_E (ptp_getdevicepropvalue (params, PTP_DPC_NIKON_LiveViewStatus, &value, PTP_DTC_UINT8)) != PTP_RC_OK)
 			value.u8 = 0;
+
+		if (have_prop(camera, params->deviceinfo.VendorExtensionID, PTP_DPC_NIKON_LiveViewProhibitCondition)) {
+			C_PTP (ptp_getdevicepropvalue (params, PTP_DPC_NIKON_LiveViewProhibitCondition, &value, PTP_DTC_UINT32));
+
+			if (value.u32) {
+				/* we could have multiple reasons, but just report the first one. by decreasing order of possibility */
+				if (value.u32 & (1<<8)) { gp_context_error (context, _("Liveview cannot start: Battery exhausted")); return GP_ERROR; }
+				if (value.u32 & (1<<17)){ gp_context_error (context, _("Liveview cannot start: Temperature too high")); return GP_ERROR; }
+				if (value.u32 & (1<<9)) { gp_context_error (context, _("Liveview cannot start: TTL error")); return GP_ERROR; }
+				if (value.u32 & (1<<22)){ gp_context_error (context, _("Liveview cannot start: In Mirror-up operation")); return GP_ERROR; }
+				if (value.u32 & (1<<24)){ gp_context_error (context, _("Liveview cannot start: Lens is retracting")); return GP_ERROR; }
+				if (value.u32 & (1<<5)) { gp_context_error (context, _("Liveview cannot start: Minimum aperture warning")); return GP_ERROR; }
+				if (value.u32 & (1<<15)){ gp_context_error (context, _("Liveview cannot start: Processing of shooting operation")); return GP_ERROR; }
+				if (value.u32 & (1<<2)) { gp_context_error (context, _("Liveview cannot start: Sequence error")); return GP_ERROR; }
+				gp_context_error (context, _("Liveview cannot start: code 0x%08x"), value.u32);
+				return GP_ERROR;
+			}
+		}
 
                 if (!value.u8) {
 			value.u8 = 1;
@@ -6620,11 +7155,13 @@ _put_Generic_OPCode(CONFIG_PUT_ARGS)
 
 	if (!sscanf(val,"0x%x", &opcode))
 		return GP_ERROR_BAD_PARAMETERS;
+	GP_LOG_D ("opcode 0x%x", opcode);
 	nparams = 0; x = val;
 	while ((x = strchr(x,',')) && (nparams<5)) {
 		x++;
 		if (!sscanf(x,"0x%x", &xparams[nparams]))
 			return GP_ERROR_BAD_PARAMETERS;
+		GP_LOG_D ("param %d 0x%x", nparams, xparams[nparams]);
 		nparams++;
 	}
 	ptp.Code = opcode;
@@ -6688,11 +7225,10 @@ _put_Nikon_Movie(CONFIG_PUT_ARGS)
 	PTPParams *params = &(camera->pl->params);
 	int val, ret;
 	GPContext *context = ((PTPData *) params->data)->context;
+	PTPPropertyValue	value;
 
 	CR (gp_widget_get_value(widget, &val));
 	if (val) {
-		PTPPropertyValue	value;
-
 		if (have_prop(camera,PTP_VENDOR_NIKON,PTP_DPC_NIKON_ApplicationMode)) {
 			value.u8 = 0;
 			C_PTP (ptp_getdevicepropvalue (params, PTP_DPC_NIKON_ApplicationMode, &value, PTP_DTC_UINT8));
@@ -6714,9 +7250,39 @@ _put_Nikon_Movie(CONFIG_PUT_ARGS)
 			C_PTP_REP_MSG (nikon_wait_busy(params, 50, 1000),
 				       _("Nikon enable liveview failed"));
 		}
+
+		if (have_prop(camera,PTP_VENDOR_NIKON,PTP_DPC_NIKON_MovRecProhibitCondition)) {
+			value.u32 = 0;
+			LOG_ON_PTP_E (ptp_getdevicepropvalue (params, PTP_DPC_NIKON_MovRecProhibitCondition, &value, PTP_DTC_UINT32));
+			if (value.u32) {
+				if (value.u32 & (1<<14)) { gp_context_error (context, _("Movie recording cannot start: Camera is not in application mode.")); return GP_ERROR; }
+				if (value.u32 & (1<<13)) { gp_context_error (context, _("Movie recording cannot start: Set liveview selector is enabled.")); return GP_ERROR; }
+				if (value.u32 & (1<<12)) { gp_context_error (context, _("Movie recording cannot start: In enlarged liveview.")); return GP_ERROR; }
+				if (value.u32 & (1<<11)) { gp_context_error (context, _("Movie recording cannot start: Card protected.")); return GP_ERROR; }
+				if (value.u32 & (1<<10)) { gp_context_error (context, _("Movie recording cannot start: Already in movie recording.")); return GP_ERROR; }
+				if (value.u32 & (1<< 9)) { gp_context_error (context, _("Movie recording cannot start: Images / movies not yet record in buffer.")); return GP_ERROR; }
+				if (value.u32 & (1<< 3)) { gp_context_error (context, _("Movie recording cannot start: Card full.")); return GP_ERROR; }
+				if (value.u32 & (1<< 2)) { gp_context_error (context, _("Movie recording cannot start: Card not formatted.")); return GP_ERROR; }
+				if (value.u32 & (1<< 1)) { gp_context_error (context, _("Movie recording cannot start: Card error.")); return GP_ERROR; }
+				if (value.u32 & (1<< 0)) { gp_context_error (context, _("Movie recording cannot start: No card.")); return GP_ERROR; }
+				gp_context_error (context, _("Movie recording cannot start: code 0x%08x"), value.u32);
+				return GP_ERROR;
+			}
+		}
+
 		C_PTP_REP (ptp_nikon_startmovie (params));
-	} else
+	} else {
 		C_PTP_REP (ptp_nikon_stopmovie (params));
+		/* switch Application Mode off again, otherwise we cannot get to the filesystem */
+		if (have_prop(camera,PTP_VENDOR_NIKON,PTP_DPC_NIKON_ApplicationMode)) {
+			value.u8 = 1;
+			C_PTP (ptp_getdevicepropvalue (params, PTP_DPC_NIKON_ApplicationMode, &value, PTP_DTC_UINT8));
+			if (value.u8 != 0) {
+				value.u8 = 0;
+				C_PTP (ptp_setdevicepropvalue (params, PTP_DPC_NIKON_ApplicationMode, &value, PTP_DTC_UINT8));
+			}
+		}
+	}
 	return GP_OK;
 }
 
@@ -6742,7 +7308,7 @@ _put_Nikon_Bulb(CONFIG_PUT_ARGS)
 		PTPPropertyValue propval2;
 		char buf[20];
 
-		C_PTP (ptp_nikon_setcontrolmode (params, 1));
+		C_PTP (ptp_nikon_changecameramode (params, 1));
 		propval2.u16 = 1; /* Exposure Mode to Full Manual */
 		C_PTP (ptp_setdevicepropvalue (params, PTP_DPC_ExposureProgramMode, &propval2, PTP_DTC_UINT16));
 		propval2.u32 = 0xffffffff; /* Exposure Time to bulb */
@@ -6839,8 +7405,10 @@ _put_Sony_ManualFocus(CONFIG_PUT_ARGS)
 	CR (gp_widget_get_value(widget, &val));
 
 	if(val != 0.0) {
+		/* value 2 seems to set it to autofocusmode. see issue https://github.com/gphoto/libgphoto2/issues/434  
 		xpropval.u16 = 2;
 		C_PTP (ptp_sony_setdevicecontrolvalueb (params, 0xd2d2, &xpropval, PTP_DTC_UINT16));
+		*/
 		if(val <= -7) xpropval.u16 = 0xFFFF - 6;
 		else if(val <= -6.0) xpropval.u16 = 0xFFFF - 5;
 		else if(val <= -5.0) xpropval.u16 = 0xFFFF - 4;
@@ -6856,7 +7424,7 @@ _put_Sony_ManualFocus(CONFIG_PUT_ARGS)
 		else if(val <= 6.0) xpropval.u16 = 6;
 		else if(val <= 7.0) xpropval.u16 = 7;
 		else xpropval.u16 = 0;
-		C_PTP (ptp_sony_setdevicecontrolvalueb (params, 0xd2d1, &xpropval, PTP_DTC_UINT16));
+		C_PTP (ptp_sony_setdevicecontrolvalueb (params, PTP_DPC_SONY_NearFar, &xpropval, PTP_DTC_UINT16));
 	} else {
 		xpropval.u16 = 1;
 		C_PTP (ptp_sony_setdevicecontrolvalueb (params, 0xd2d2, &xpropval, PTP_DTC_UINT16));
@@ -7439,6 +8007,39 @@ _put_Nikon_FastFS(CONFIG_PUT_ARGS) {
 	return GP_OK;
 }
 
+static int
+_get_Nikon_Thumbsize(CONFIG_GET_ARGS) {
+	char buf[1024];
+
+	gp_widget_new (GP_WIDGET_RADIO, _(menu->label), widget);
+	gp_widget_add_choice (*widget, _("normal"));
+	gp_widget_add_choice (*widget, _("large"));
+	gp_widget_set_name (*widget, menu->name);
+	strcpy(buf,"normal");
+	gp_setting_get("ptp2","thumbsize", buf);
+	gp_widget_set_value  (*widget, N_(buf));
+	return GP_OK;
+}
+
+static int
+_put_Nikon_Thumbsize(CONFIG_PUT_ARGS) {
+	char *buf;
+	PTPParams	*params = &(camera->pl->params);
+	GPContext	*context = ((PTPData *) params->data)->context;
+
+	CR (gp_widget_get_value  (widget, &buf));
+	if (!strcmp(buf,_("normal"))) {
+		gp_setting_set("ptp2","thumbsize","normal");
+		return GP_OK;
+	}
+	if (!strcmp(buf,_("large"))) {
+		gp_setting_set("ptp2","thumbsize","large");
+		return GP_OK;
+	}
+	gp_context_error (context, _("Unknown thumb size value '%s'."), buf);
+	return GP_ERROR;
+}
+
 static struct {
 	char	*name;
 	char	*label;
@@ -7496,6 +8097,57 @@ _put_CaptureTarget(CONFIG_PUT_ARGS) {
 	}
 	return GP_OK;
 }
+
+static struct deviceproptableu16 sony_capturetarget[] = {
+	{ "sdram",		0x0001, 0 },
+	{ "card",		0x0010, 0 },
+	{ "card+sdram",		0x0011, 0 },
+};
+GENERIC16TABLE(Sony_CaptureTarget,sony_capturetarget)
+
+static struct deviceproptableu32 audio_format[] = {
+	{ "PCM",		0x0001, 0 },
+	{ "ADPCM",		0x0002, 0 },
+	{ "IEEE float",		0x0003, 0 },
+	{ "VSELP",		0x0004, 0 },
+	{ "IBM CVSD",		0x0005, 0 },
+	{ "a-Law",		0x0006, 0 },
+	{ "u-Law",		0x0007, 0 },
+	{ "DTS",		0x0008, 0 },
+	{ "DRM",		0x0009, 0 },
+	{ "OKI-ADPCM",		0x0010, 0 },
+	{ "IMA-ADPCM",		0x0011, 0 },
+	{ "Mediaspace ADPCM",	0x0012, 0 },
+	{ "Sierra ADPCM",	0x0013, 0 },
+	{ "G723 ADPCM",		0x0014, 0 },
+	{ "DIGISTD",		0x0015, 0 },
+	{ "DIGIFIX",		0x0016, 0 },
+	{ "Dolby AC2",		0x0030, 0 },
+	{ "GSM 610",		0x0031, 0 },
+	{ "Rockwell ADPCM",	0x003b, 0 },
+	{ "Rockwell DIGITALK",	0x003c, 0 },
+	{ "G721 ADPCM",		0x0040, 0 },
+	{ "G728 CELP",		0x0041, 0 },
+	{ "MPEG",		0x0050, 0 },
+	{ "RT24",		0x0052, 0 },
+	{ "PAC",		0x0053, 0 },
+	{ "MP3",		0x0055, 0 },
+	{ "G726 ADPCM",		0x0064, 0 },
+	{ "G722 ADPCM",		0x0065, 0 },
+	{ "IBM u-Law",		0x0101, 0 },
+	{ "IBM a-Law",		0x0102, 0 },
+	{ "IBM ADPCM",		0x0103, 0 },
+	{ "Ogg Vorbis 1",	0x674f, 0 },
+	{ "Ogg Vorbis 1 PLUS",	0x676f, 0 },
+	{ "Ogg Vorbis 2",	0x6750, 0 },
+	{ "Ogg Vorbis 2 PLUS",	0x6770, 0 },
+	{ "Ogg Vorbis 3",	0x6751, 0 },
+	{ "Ogg Vorbis 3 PLUS",	0x6771, 0 },
+	{ "Ogg Vorbis 3 PLUS",	0x6771, 0 },
+	/* Development 0xffff */
+	/* Reserved 0xffff...  */
+};
+GENERIC32TABLE(Audio_Format,audio_format)
 
 static struct {
 	char	*name;
@@ -8108,7 +8760,7 @@ static struct submenu camera_actions_menu[] = {
 	{ N_("Drive Canon DSLR Autofocus"),     "autofocusdrive",   0,  PTP_VENDOR_CANON,   PTP_OC_CANON_EOS_DoAf,              _get_Canon_EOS_AFDrive,         _put_Canon_EOS_AFDrive },
 	{ N_("Drive Nikon DSLR Manual focus"),  "manualfocusdrive", 0,  PTP_VENDOR_NIKON,   PTP_OC_NIKON_MfDrive,               _get_Nikon_MFDrive,             _put_Nikon_MFDrive },
 	{ N_("Set Nikon Autofocus area"),       "changeafarea",     0,  PTP_VENDOR_NIKON,   PTP_OC_NIKON_ChangeAfArea,          _get_Nikon_ChangeAfArea,        _put_Nikon_ChangeAfArea },
-	{ N_("Set Nikon Control Mode"),         "controlmode",      0,  PTP_VENDOR_NIKON,   PTP_OC_NIKON_SetControlMode,        _get_Nikon_ControlMode,         _put_Nikon_ControlMode },
+	{ N_("Set Nikon Control Mode"),         "controlmode",      0,  PTP_VENDOR_NIKON,   PTP_OC_NIKON_ChangeCameraMode,      _get_Nikon_ControlMode,         _put_Nikon_ControlMode },
 	{ N_("Drive Canon DSLR Manual focus"),  "manualfocusdrive", 0,  PTP_VENDOR_CANON,   PTP_OC_CANON_EOS_DriveLens,         _get_Canon_EOS_MFDrive,         _put_Canon_EOS_MFDrive },
 	{ N_("Cancel Canon DSLR Autofocus"),    "cancelautofocus",  0,  PTP_VENDOR_CANON,   PTP_OC_CANON_EOS_AfCancel,          _get_Canon_EOS_AFCancel,        _put_Canon_EOS_AFCancel },
 	{ N_("Drive Olympus OMD Manual focus"), "manualfocusdrive", 0,  PTP_VENDOR_GP_OLYMPUS_OMD, PTP_OC_OLYMPUS_OMD_MFDrive,	_get_Olympus_OMD_MFDrive,	_put_Olympus_OMD_MFDrive },
@@ -8144,16 +8796,21 @@ static struct submenu camera_status_menu[] = {
 	{ N_("Battery Level"),          "batterylevel",     PTP_DPC_BatteryLevel,                   0,                  PTP_DTC_UINT8,  _get_BatteryLevel,              _put_None },
 	{ N_("Battery Level"),          "batterylevel",     PTP_DPC_CANON_EOS_BatteryPower,         PTP_VENDOR_CANON,   PTP_DTC_UINT16, _get_Canon_EOS_BatteryLevel,    _put_None },
 	{ N_("Battery Level"),          "batterylevel",     PTP_DPC_SONY_BatteryLevel,              PTP_VENDOR_SONY,    PTP_DTC_INT8,   _get_SONY_BatteryLevel,         _put_None },
+	{ N_("Mirror Up Status"),       "mirrorupstatus",   PTP_DPC_NIKON_MirrorUpStatus,           PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_OnOff_UINT8,		_put_None },
+	{ N_("Mirror Up Shooting Count"),"mirrorupshootingcount", PTP_DPC_NIKON_MirrorUpReleaseShootingCount, PTP_VENDOR_NIKON, PTP_DTC_UINT8,  _get_INT,		_put_None },
+	{ N_("Continuous Shooting Count"),"continousshootingcount", PTP_DPC_NIKON_ContinousShootingCount, PTP_VENDOR_NIKON, PTP_DTC_UINT8,_get_INT,			_put_None },
 	{ N_("Camera Orientation"),     "orientation",      PTP_DPC_NIKON_CameraOrientation,        PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_CameraOrientation,   _put_None },
-	{ N_("Camera Orientation"),     "orientation2",     PTP_DPC_NIKON_AngleLevel,               PTP_VENDOR_NIKON,   PTP_DTC_INT32,  _get_Nikon_AngleLevel,          _put_None },
+	{ N_("Camera Orientation"),     "orientation2",     PTP_DPC_NIKON_AngleLevel,               PTP_VENDOR_NIKON,   PTP_DTC_INT32,  _get_Nikon_AngleLevel,		_put_None },
 	{ N_("Camera Orientation"),     "orientation",      PTP_DPC_CANON_RotationAngle,            PTP_VENDOR_CANON,   PTP_DTC_UINT16, _get_Canon_CameraOrientation,   _put_None },
 	{ N_("Flash Open"),             "flashopen",        PTP_DPC_NIKON_FlashOpen,                PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_OnOff_UINT8,         _put_None },
+	{ N_("Active Folder"),          "activefolder",     PTP_DPC_NIKON_ActiveFolder,             PTP_VENDOR_NIKON,   PTP_DTC_UINT16, _get_INT,         		_put_None },
 	{ N_("Flash Charged"),          "flashcharged",     PTP_DPC_NIKON_FlashCharged,             PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_OnOff_UINT8,         _put_None },
 	{ N_("Lens Name"),              "lensname",         PTP_DPC_NIKON_LensID,                   PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_LensID,              _put_None },
 	{ N_("Lens Name"),              "lensname",         PTP_DPC_CANON_EOS_LensName,             PTP_VENDOR_CANON,   PTP_DTC_STR,    _get_STR,                       _put_None },
 	{ N_("Serial Number"),          "eosserialnumber",  PTP_DPC_CANON_EOS_SerialNumber,         PTP_VENDOR_CANON,   PTP_DTC_STR,    _get_STR,                       _put_None },
 	{ N_("Shutter Counter"),        "shuttercounter",   PTP_DPC_CANON_EOS_ShutterCounter,       PTP_VENDOR_CANON,   PTP_DTC_UINT32, _get_INT,                       _put_None },
 	{ N_("Available Shots"),        "availableshots",   PTP_DPC_CANON_EOS_AvailableShots,       PTP_VENDOR_CANON,   PTP_DTC_UINT32, _get_INT,                       _put_None },
+	{ N_("Available Shots"),        "availableshots",   PTP_DPC_NIKON_ExposureRemaining,        PTP_VENDOR_NIKON,   PTP_DTC_UINT32, _get_INT,                       _put_None },
 	{ N_("Focal Length Minimum"),   "minfocallength",   PTP_DPC_NIKON_FocalLengthMin,           PTP_VENDOR_NIKON,   PTP_DTC_UINT32, _get_Nikon_FocalLength,         _put_None },
 	{ N_("Focal Length Maximum"),   "maxfocallength",   PTP_DPC_NIKON_FocalLengthMax,           PTP_VENDOR_NIKON,   PTP_DTC_UINT32, _get_Nikon_FocalLength,         _put_None },
 	{ N_("Maximum Aperture at Focal Length Minimum"), "apertureatminfocallength", PTP_DPC_NIKON_MaxApAtMinFocalLength, PTP_VENDOR_NIKON, PTP_DTC_UINT16, _get_Nikon_ApertureAtFocalLength, _put_None },
@@ -8201,13 +8858,16 @@ static struct submenu camera_settings_menu[] = {
 	{ N_("Auto Power Off"),         "autopoweroff",         PTP_DPC_CANON_EOS_AutoPowerOff,     PTP_VENDOR_CANON,   PTP_DTC_UINT16, _get_INT,                       _put_INT },
 	{ N_("Depth of Field"),         "depthoffield",         PTP_DPC_CANON_EOS_DepthOfFieldPreview, PTP_VENDOR_CANON,PTP_DTC_UINT32, _get_INT,                       _put_INT },
 	{ N_("Menus and Playback"),     "menusandplayback",     PTP_DPC_NIKON_MenusAndPlayback,     PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_MenusAndPlayback,    _put_Nikon_MenusAndPlayback },
+	{ N_("External Recording Control"),     "externalrecordingcontrol", PTP_DPC_NIKON_ExternalRecordingControl,     PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_OffOn_UINT8,    _put_Nikon_OffOn_UINT8 },
 
 /* virtual */
+	{ N_("Thumb Size"),		"thumbsize",    0,  PTP_VENDOR_NIKON,   0,  _get_Nikon_Thumbsize,   _put_Nikon_Thumbsize },
 	{ N_("Fast Filesystem"),	"fastfs",	0,  PTP_VENDOR_NIKON,   0,  _get_Nikon_FastFS,      _put_Nikon_FastFS },
 	{ N_("Capture Target"),		"capturetarget",0,  PTP_VENDOR_NIKON,   0,  _get_CaptureTarget,     _put_CaptureTarget },
 	{ N_("Autofocus"),		"autofocus",    0,  PTP_VENDOR_NIKON,   0,  _get_Autofocus,         _put_Autofocus },
 	{ N_("Capture Target"),		"capturetarget",0,  PTP_VENDOR_CANON,   0,  _get_CaptureTarget,     _put_CaptureTarget },
 	{ N_("Capture Target"),		"capturetarget",0,  PTP_VENDOR_PANASONIC,0, _get_CaptureTarget,     _put_CaptureTarget },
+	{ N_("Capture Target"),		"capturetarget",PTP_DPC_SONY_StillImageStoreDestination,  PTP_VENDOR_SONY,0, _get_Sony_CaptureTarget,     _put_Sony_CaptureTarget },
 	{ N_("CHDK"),     		"chdk",		PTP_OC_CHDK,  PTP_VENDOR_CANON,   0,  _get_CHDK,     _put_CHDK },
 	{ N_("Capture"),		"capture",	0,  PTP_VENDOR_CANON,   0,  _get_Canon_CaptureMode, _put_Canon_CaptureMode },
 	{ N_("Remote Mode"),		"remotemode",	PTP_OC_CANON_EOS_SetRemoteMode,  PTP_VENDOR_CANON,   0,  _get_Canon_RemoteMode, _put_Canon_RemoteMode },
@@ -8225,19 +8885,25 @@ static struct submenu image_settings_menu[] = {
 	{ N_("Image Format"),           "imageformat",          PTP_DPC_FUJI_Quality,                   PTP_VENDOR_FUJI,    PTP_DTC_UINT16, _get_Fuji_ImageFormat,          _put_Fuji_ImageFormat },
 	{ N_("Image Format"),           "imageformat",          0,					PTP_VENDOR_PANASONIC,PTP_DTC_UINT16, _get_Panasonic_ImageFormat,    _put_Panasonic_ImageFormat },
 	{ N_("Image Format Ext HD"),    "imageformatexthd",     PTP_DPC_CANON_EOS_ImageFormatExtHD,     PTP_VENDOR_CANON,   PTP_DTC_UINT16, _get_Canon_EOS_ImageFormat,     _put_Canon_EOS_ImageFormat },
-	{ N_("Image Size"),             "imagesize",            PTP_DPC_ImageSize,                      0,                  PTP_DTC_STR,    _get_ImageSize,                 _put_ImageSize },
+	{ N_("Film Simulation"),        "filmsimulation",       PTP_DPC_FUJI_FilmSimulation,            PTP_VENDOR_FUJI,    PTP_DTC_UINT16, _get_Fuji_FilmSimulation,       _put_Fuji_FilmSimulation },
+	{ N_("Image Size"),             "imagesize",            PTP_DPC_ImageSize,                      0,                  PTP_DTC_STR,    _get_STR_ENUMList,              _put_STR },
+	{ N_("Raw Image Size"),         "rawimagesize",         PTP_DPC_NIKON_RawImageSize,             PTP_VENDOR_NIKON,   PTP_DTC_STR,    _get_STR_ENUMList,              _put_STR },
 	{ N_("Image Size"),             "imagesize",            PTP_DPC_NIKON_1_ImageSize,              PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon1_ImageSize,          _put_Nikon1_ImageSize },
 	{ N_("Image Size"),             "imagesize",            PTP_DPC_SONY_ImageSize,                 PTP_VENDOR_SONY,    PTP_DTC_UINT8,  _get_Sony_ImageSize,            _put_Sony_ImageSize },
 	{ N_("Image Size"),             "imagesize",            PTP_DPC_CANON_ImageSize,                PTP_VENDOR_CANON,   PTP_DTC_UINT8,  _get_Canon_Size,                _put_Canon_Size },
 	{ N_("ISO Speed"),              "iso",                  PTP_DPC_CANON_ISOSpeed,                 PTP_VENDOR_CANON,   PTP_DTC_UINT16, _get_Canon_ISO,                 _put_Canon_ISO },
-	{ N_("ISO Speed"),              "iso",                  PTP_DPC_ExposureIndex,                  0,                  PTP_DTC_UINT16, _get_ISO,                       _put_ISO },
-	{ N_("Movie ISO Speed"),        "movieiso",             PTP_DPC_NIKON_MovieISO,                 PTP_VENDOR_NIKON,   PTP_DTC_UINT32, _get_ISO32,                     _put_ISO32 },
+	{ N_("ISO Speed"),              "iso",                  PTP_DPC_ExposureIndex,                  PTP_VENDOR_FUJI,    PTP_DTC_INT32,  _get_INT,                       _put_INT },
+	{ N_("ISO Speed"),              "iso",                  PTP_DPC_ExposureIndex,                  0,                  PTP_DTC_UINT16, _get_INT,                       _put_INT },
+	{ N_("Movie ISO Speed"),        "movieiso",             PTP_DPC_NIKON_MovieISO,                 PTP_VENDOR_NIKON,   PTP_DTC_UINT32, _get_INT,                       _put_INT },
 	{ N_("ISO Speed"),              "iso",                  PTP_DPC_CANON_EOS_ISOSpeed,             PTP_VENDOR_CANON,   PTP_DTC_UINT16, _get_Canon_ISO,                 _put_Canon_ISO },
+	/* these 2 iso will overwrite and conflicht with each other... the older Sony do not have d226, so it should pick the next entry ... */
+	{ N_("ISO Speed"),              "iso",                  PTP_DPC_SONY_ISO2,                      PTP_VENDOR_SONY,    PTP_DTC_UINT32, _get_Sony_ISO,                  _put_Sony_ISO2 },
 	{ N_("ISO Speed"),              "iso",                  PTP_DPC_SONY_ISO,                       PTP_VENDOR_SONY,    PTP_DTC_UINT32, _get_Sony_ISO,                  _put_Sony_ISO },
 	{ N_("ISO Speed"),              "iso",                  PTP_DPC_NIKON_1_ISO,                    PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_1_ISO,               _put_Nikon_1_ISO },
 	{ N_("ISO Speed"),              "iso",                  PTP_DPC_OLYMPUS_ISO,                    PTP_VENDOR_GP_OLYMPUS_OMD, PTP_DTC_UINT16,  _get_Olympus_ISO,       _put_Olympus_ISO },
 	{ N_("ISO Speed"),              "iso",             	0,         		    		PTP_VENDOR_PANASONIC,   PTP_DTC_UINT32, _get_Panasonic_ISO,         _put_Panasonic_ISO },
 	{ N_("ISO Auto"),               "isoauto",              PTP_DPC_NIKON_ISO_Auto,                 PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_OnOff_UINT8,         _put_Nikon_OnOff_UINT8 },
+	{ N_("Auto ISO"),               "autoiso",              PTP_DPC_NIKON_ISOAuto,                  PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_OnOff_UINT8,         _put_Nikon_OnOff_UINT8 },
 	{ N_("WhiteBalance"),           "whitebalance",         PTP_DPC_OLYMPUS_WhiteBalance,           PTP_VENDOR_GP_OLYMPUS_OMD, PTP_DTC_UINT16,  _get_Olympus_WhiteBalance, _put_Olympus_WhiteBalance },
 	{ N_("WhiteBalance"),           "whitebalance",         PTP_DPC_CANON_WhiteBalance,             PTP_VENDOR_CANON,   PTP_DTC_UINT8,  _get_Canon_WhiteBalance,        _put_Canon_WhiteBalance },
 	{ N_("WhiteBalance"),           "whitebalance",         PTP_DPC_CANON_EOS_WhiteBalance,         PTP_VENDOR_CANON,   PTP_DTC_UINT8,  _get_Canon_EOS_WhiteBalance,    _put_Canon_EOS_WhiteBalance },
@@ -8253,7 +8919,17 @@ static struct submenu image_settings_menu[] = {
 	{ N_("Color Model"),            "colormodel",           PTP_DPC_NIKON_ColorModel,               PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_ColorModel,          _put_Nikon_ColorModel },
 	{ N_("Color Space"),            "colorspace",           PTP_DPC_NIKON_ColorSpace,               PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_ColorSpace,          _put_Nikon_ColorSpace },
 	{ N_("Color Space"),            "colorspace",           PTP_DPC_CANON_EOS_ColorSpace,           PTP_VENDOR_CANON,   PTP_DTC_UINT16, _get_Canon_EOS_ColorSpace,      _put_Canon_EOS_ColorSpace },
-	{ N_("Auto ISO"),               "autoiso",              PTP_DPC_NIKON_ISOAuto,                  PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_OnOff_UINT8,         _put_Nikon_OnOff_UINT8 },
+	{ N_("Video Format"),           "videoformat",          PTP_DPC_VideoFormat,                    0,                  PTP_DTC_UINT32, _get_VideoFormat,               _put_VideoFormat },
+	{ N_("Video Resolution"),       "videoresolution",      PTP_DPC_VideoResolution,                0,                  PTP_DTC_STR   , _get_STR_ENUMList,              _put_STR },
+	{ N_("Video Quality"),          "videoquality",         PTP_DPC_VideoQuality,                   0,                  PTP_DTC_UINT16, _get_INT,                       _put_INT },
+	{ N_("Video Framerate"),        "videoframerate",       PTP_DPC_VideoFrameRate,                 0,                  PTP_DTC_UINT32, _get_Video_Framerate,           _put_Video_Framerate },
+	{ N_("Video Contrast"),         "videocontrast",        PTP_DPC_VideoContrast,                  0,                  PTP_DTC_UINT32, _get_INT,                       _put_INT },
+	{ N_("Video Brightness"),       "videobrightness",      PTP_DPC_VideoBrightness,                0,                  PTP_DTC_UINT32, _get_INT,                       _put_INT },
+	{ N_("Audio Format"),           "audioformat",          PTP_DPC_AudioFormat,                    0,                  PTP_DTC_UINT32, _get_Audio_Format,              _put_Audio_Format },
+	{ N_("Audio Bitrate"),          "audiobitrate",         PTP_DPC_AudioBitrate,                   0,                  PTP_DTC_UINT32, _get_INT,                       _put_INT },
+	{ N_("Audio Sampling Rate"),    "audiosamplingrate",    PTP_DPC_AudioSamplingRate,              0,                  PTP_DTC_UINT32, _get_INT,                       _put_INT },
+	{ N_("Audio Bit per Sample"),   "audiobitpersample",    PTP_DPC_AudioBitPerSample,              0,                  PTP_DTC_UINT16, _get_INT,                       _put_INT },
+	{ N_("Audio Volume"),           "audiovolume",          PTP_DPC_AudioVolume,                    0,                  PTP_DTC_UINT32, _get_INT,                       _put_INT },
 	{ 0,0,0,0,0,0,0 },
 };
 
@@ -8270,6 +8946,7 @@ static struct submenu capture_settings_menu[] = {
 	{ N_("Self Timer"),                     "selftimer",                PTP_DPC_CANON_SelfTime,                 PTP_VENDOR_CANON,   PTP_DTC_UINT16, _get_Canon_SelfTimer,               _put_Canon_SelfTimer },
 	{ N_("Assist Light"),                   "assistlight",              PTP_DPC_NIKON_AFAssist,                 PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_OnOff_UINT8,             _put_Nikon_OnOff_UINT8 },
 	{ N_("Exposure Compensation"),          "exposurecompensation",     PTP_DPC_OLYMPUS_ExposureCompensation,   PTP_VENDOR_GP_OLYMPUS_OMD, PTP_DTC_UINT16,  _get_Olympus_ExpCompensation,_put_Olympus_ExpCompensation },
+	{ N_("Exposure Compensation"),          "exposurecompensation",     PTP_DPC_SONY_ExposureCompensation,      PTP_VENDOR_SONY,    PTP_DTC_INT16,  _get_ExpCompensation,               _put_Sony_ExpCompensation2 },
 	{ N_("Exposure Compensation"),          "exposurecompensation",     PTP_DPC_ExposureBiasCompensation,       PTP_VENDOR_SONY,    PTP_DTC_INT16,  _get_ExpCompensation,               _put_Sony_ExpCompensation },
 	{ N_("Exposure Compensation"),          "exposurecompensation",     PTP_DPC_ExposureBiasCompensation,       0,                  PTP_DTC_INT16,  _get_ExpCompensation,               _put_ExpCompensation },
 	{ N_("Exposure Compensation"),          "exposurecompensation",     PTP_DPC_CANON_ExpCompensation,          PTP_VENDOR_CANON,   PTP_DTC_UINT8,  _get_Canon_ExpCompensation,         _put_Canon_ExpCompensation },
@@ -8344,16 +9021,18 @@ static struct submenu capture_settings_menu[] = {
 	{ N_("Focusing Point"),                 "focusingpoint",            PTP_DPC_CANON_FocusingPoint,            PTP_VENDOR_CANON,   PTP_DTC_UINT16, _get_Canon_FocusingPoint,           _put_Canon_FocusingPoint },
 	{ N_("Sharpness"),                      "sharpness",                PTP_DPC_Sharpness,                      0,                  PTP_DTC_UINT8,  _get_Sharpness,                     _put_Sharpness },
 	{ N_("Capture Delay"),                  "capturedelay",             PTP_DPC_CaptureDelay,                   0,                  PTP_DTC_UINT32, _get_Milliseconds,                  _put_Milliseconds },
+	{ N_("Shutter Speed"),                  "shutterspeed",             PTP_DPC_ExposureTime,		    PTP_VENDOR_FUJI,    PTP_DTC_UINT32,	_get_Fuji_New_ShutterSpeed,	    _put_Fuji_New_ShutterSpeed },
 	{ N_("Shutter Speed"),                  "shutterspeed",             PTP_DPC_ExposureTime,                   0,                  PTP_DTC_UINT32, _get_ExpTime,                       _put_ExpTime },
 	{ N_("Shutter Speed"),                  "shutterspeed",             PTP_DPC_CANON_ShutterSpeed,             PTP_VENDOR_CANON,   PTP_DTC_UINT16, _get_Canon_ShutterSpeed,            _put_Canon_ShutterSpeed },
 	{ N_("Shutter Speed"),                  "shutterspeed",             0,						PTP_VENDOR_PANASONIC,   PTP_DTC_INT32, _get_Panasonic_Shutter,         _put_Panasonic_Shutter },
 	/* these cameras also have PTP_DPC_ExposureTime, avoid overlap */
 	{ N_("Shutter Speed 2"),                "shutterspeed2",            PTP_DPC_NIKON_ExposureTime,             PTP_VENDOR_NIKON,   PTP_DTC_UINT32, _get_Nikon_ShutterSpeed,            _put_Nikon_ShutterSpeed },
 	{ N_("Movie Shutter Speed 2"),          "movieshutterspeed",        PTP_DPC_NIKON_MovieShutterSpeed,        PTP_VENDOR_NIKON,   PTP_DTC_UINT32, _get_Nikon_ShutterSpeed,            _put_Nikon_ShutterSpeed },
-	/* olympus uses also a 16 bit/16bit seperation */
+	/* olympus uses also a 16 bit/16bit separation */
 	{ N_("Shutter Speed"),                  "shutterspeed",             PTP_DPC_OLYMPUS_Shutterspeed,           PTP_VENDOR_GP_OLYMPUS_OMD,   PTP_DTC_UINT32, _get_Olympus_ShutterSpeed, _put_Olympus_ShutterSpeed },
 	{ N_("Shutter Speed"),                  "shutterspeed",             PTP_DPC_CANON_EOS_ShutterSpeed,         PTP_VENDOR_CANON,   PTP_DTC_UINT16, _get_Canon_ShutterSpeed,            _put_Canon_ShutterSpeed },
 	{ N_("Shutter Speed"),                  "shutterspeed",             PTP_DPC_FUJI_ShutterSpeed,              PTP_VENDOR_FUJI,    PTP_DTC_INT16,  _get_Fuji_ShutterSpeed,             _put_Fuji_ShutterSpeed },
+	{ N_("Shutter Speed"),                  "shutterspeed",             PTP_DPC_SONY_ShutterSpeed2,             PTP_VENDOR_SONY,    PTP_DTC_UINT32,  _get_Sony_ShutterSpeed,             _put_Sony_ShutterSpeed },
 	{ N_("Shutter Speed"),                  "shutterspeed",             PTP_DPC_SONY_ShutterSpeed,              PTP_VENDOR_SONY,    PTP_DTC_UINT32,  _get_Sony_ShutterSpeed,             _put_Sony_ShutterSpeed },
 	{ N_("Shutter Speed"),                  "shutterspeed",             PTP_DPC_RICOH_ShutterSpeed,             PTP_VENDOR_PENTAX,  PTP_DTC_UINT64, _get_Ricoh_ShutterSpeed,            _put_Ricoh_ShutterSpeed },
 	{ N_("Metering Mode"),                  "meteringmode",             PTP_DPC_CANON_MeteringMode,             PTP_VENDOR_CANON,   PTP_DTC_UINT8,  _get_Canon_MeteringMode,            _put_Canon_MeteringMode },
@@ -8366,6 +9045,9 @@ static struct submenu capture_settings_menu[] = {
 	{ N_("Live View AF Mode"),              "liveviewafmode",           PTP_DPC_NIKON_LiveViewAFArea,           PTP_VENDOR_NIKON,   PTP_DTC_INT8,   _get_Nikon_LiveViewAFI,             _put_Nikon_LiveViewAFI },
 	{ N_("Live View AF Mode"),              "liveviewafmode",           PTP_DPC_NIKON_LiveViewAFArea,           PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_LiveViewAFU,             _put_Nikon_LiveViewAFU },
 	{ N_("Live View AF Focus"),             "liveviewaffocus",          PTP_DPC_NIKON_LiveViewAFFocus,          PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_LiveViewAFFocus,         _put_Nikon_LiveViewAFFocus },
+	{ N_("Live View Exposure Preview"),     "liveviewexposurepreview",  PTP_DPC_NIKON_LiveViewExposurePreview,  PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_OffOn_UINT8,             _put_Nikon_OffOn_UINT8 },
+	{ N_("Live View Image Zoom Ratio"),     "liveviewimagezoomratio",   PTP_DPC_NIKON_LiveViewImageZoomRatio,   PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_LiveViewImageZoomRatio,  _put_Nikon_LiveViewImageZoomRatio },
+	{ N_("Live View White Balance"),        "liveviewwhitebalance",     PTP_DPC_NIKON_LiveViewWhiteBalance,     PTP_VENDOR_NIKON,   PTP_DTC_UINT16, _get_WhiteBalance,                  _put_WhiteBalance },
 	{ N_("File Number Sequencing"),         "filenrsequencing",         PTP_DPC_NIKON_FileNumberSequence,       PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_OnOff_UINT8,             _put_Nikon_OnOff_UINT8 },
 	{ N_("Flash Sign"),                     "flashsign",                PTP_DPC_NIKON_FlashSign,                PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_OnOff_UINT8,             _put_Nikon_OnOff_UINT8 },
 	{ N_("Modelling Flash"),                "modelflash",               PTP_DPC_NIKON_E4ModelingFlash,          PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_OffOn_UINT8,             _put_Nikon_OffOn_UINT8 },
@@ -8375,15 +9057,28 @@ static struct submenu capture_settings_menu[] = {
 	{ N_("Release without CF card"),        "nocfcardrelease",          PTP_DPC_NIKON_NoCFCard,                 PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_OnOff_UINT8,             _put_Nikon_OnOff_UINT8 },
 	{ N_("Flash Mode Manual Power"),        "flashmodemanualpower",     PTP_DPC_NIKON_FlashModeManualPower,     PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_FlashModeManualPower,    _put_Nikon_FlashModeManualPower },
 	{ N_("Auto Focus Area"),                "autofocusarea",            PTP_DPC_NIKON_AutofocusArea,            PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_AutofocusArea,           _put_Nikon_AutofocusArea },
-	{ N_("Flash Exposure Compensation"),    "flashexposurecompensation", PTP_DPC_NIKON_FlashExposureCompensation, PTP_VENDOR_NIKON, PTP_DTC_UINT8,  _get_Nikon_FlashExposureCompensation, _put_Nikon_FlashExposureCompensation },
+	{ N_("Flash Exposure Compensation"),    "flashexposurecompensation", PTP_DPC_NIKON_FlashExposureCompensation, PTP_VENDOR_NIKON, PTP_DTC_INT8,   _get_Nikon_FlashExposureCompensation, _put_Nikon_FlashExposureCompensation },
 	{ N_("Bracketing"),                     "bracketing",               PTP_DPC_NIKON_Bracketing,               PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_OnOff_UINT8,             _put_Nikon_OnOff_UINT8 },
 	{ N_("Bracketing"),                     "bracketmode",              PTP_DPC_NIKON_E6ManualModeBracketing,   PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_ManualBracketMode,       _put_Nikon_ManualBracketMode },
-	{ N_("Bracket Mode"),                   "bracketmode",              PTP_DPC_CANON_EOS_BracketMode,          PTP_VENDOR_CANON,   PTP_DTC_UINT16, _get_INT,                           _put_None /*FIXME*/ },
+	{ N_("Bracket Mode"),                   "bracketmode",              PTP_DPC_CANON_EOS_BracketMode,          PTP_VENDOR_CANON,   PTP_DTC_UINT16, _get_Canon_BracketMode,             _put_Canon_BracketMode },
 	{ N_("EV Step"),                        "evstep",                   PTP_DPC_NIKON_EVStep,                   PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_EVStep,                  _put_Nikon_EVStep },
 	{ N_("Bracket Set"),                    "bracketset",               PTP_DPC_NIKON_BracketSet,               PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_BracketSet,              _put_Nikon_BracketSet },
 	{ N_("Bracket Order"),                  "bracketorder",             PTP_DPC_NIKON_BracketOrder,             PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_BracketOrder,            _put_Nikon_BracketOrder },
-	{ N_("Burst Number"),                   "burstnumber",              PTP_DPC_BurstNumber,                    0,                  PTP_DTC_UINT16, _get_BurstNumber,                   _put_BurstNumber },
-	{ N_("Burst Interval"),                 "burstinterval",            PTP_DPC_BurstNumber,                    0,                  PTP_DTC_UINT16, _get_Milliseconds,                  _put_Milliseconds },
+	{ N_("AE Bracketing Step"),             "aebracketingstep",         PTP_DPC_NIKON_AutoExposureBracketStep,  PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_AEBracketStep,           _put_Nikon_AEBracketStep },
+	{ N_("WB Bracketing Step"),             "wbbracketingstep",         PTP_DPC_NIKON_WhiteBalanceBracketStep,  PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_WBBracketStep,           _put_Nikon_WBBracketStep },
+	{ N_("AE Bracketing Pattern"),          "aebracketingpattern",      PTP_DPC_NIKON_AutoExposureBracketProgram,PTP_VENDOR_NIKON,	PTP_DTC_UINT8,  _get_Nikon_BracketPattern,          _put_Nikon_BracketPattern },
+	{ N_("WB Bracketing Pattern"),          "wbbracketingpattern",      PTP_DPC_NIKON_WhiteBalanceBracketProgram,PTP_VENDOR_NIKON,	PTP_DTC_UINT8,  _get_Nikon_BracketPattern,          _put_Nikon_BracketPattern },
+	{ N_("AE Bracketing Count"),            "aebracketingcount",        PTP_DPC_NIKON_AutoExposureBracketCount, PTP_VENDOR_NIKON,	PTP_DTC_UINT8,  _get_INT,          		    _put_None },
+	{ N_("ADL Bracketing Pattern"),         "adlbracketingpattern",     PTP_DPC_NIKON_ADLBracketingPattern,	    PTP_VENDOR_NIKON,	PTP_DTC_UINT8,  _get_Nikon_ADLBracketPattern,       _put_Nikon_ADLBracketPattern },
+	{ N_("ADL Bracketing Step"),            "adlbracketingstep",        PTP_DPC_NIKON_ADLBracketingStep,	    PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_ADLBracketStep,          _put_Nikon_ADLBracketStep },
+	{ N_("WB Preset Comment 1"),		"wbpresetcomment1",	    PTP_DPC_NIKON_WhiteBalancePresetName1,  PTP_VENDOR_NIKON,   PTP_DTC_STR,	_get_STR,          		    _put_STR },
+	{ N_("WB Preset Comment 2"),		"wbpresetcomment2",	    PTP_DPC_NIKON_WhiteBalancePresetName2,  PTP_VENDOR_NIKON,   PTP_DTC_STR,	_get_STR,          		    _put_STR },
+	{ N_("WB Preset Comment 3"),		"wbpresetcomment3",	    PTP_DPC_NIKON_WhiteBalancePresetName3,  PTP_VENDOR_NIKON,   PTP_DTC_STR,	_get_STR,          		    _put_STR },
+	{ N_("WB Preset Comment 4"),		"wbpresetcomment4",	    PTP_DPC_NIKON_WhiteBalancePresetName4,  PTP_VENDOR_NIKON,   PTP_DTC_STR,	_get_STR,          		    _put_STR },
+	{ N_("WB Preset Comment 5"),		"wbpresetcomment5",	    PTP_DPC_NIKON_WhiteBalancePresetName5,  PTP_VENDOR_NIKON,   PTP_DTC_STR,	_get_STR,          		    _put_STR },
+	{ N_("WB Preset Comment 6"),		"wbpresetcomment6",	    PTP_DPC_NIKON_WhiteBalancePresetName6,  PTP_VENDOR_NIKON,   PTP_DTC_STR,	_get_STR,          		    _put_STR },
+	{ N_("Burst Number"),                   "burstnumber",              PTP_DPC_BurstNumber,                    0,                  PTP_DTC_UINT16, _get_INT,                           _put_INT },
+	{ N_("Burst Interval"),                 "burstinterval",            PTP_DPC_BurstInterval,                  0,                  PTP_DTC_UINT16, _get_Milliseconds,                  _put_Milliseconds },
 	{ N_("Maximum Shots"),                  "maximumshots",             PTP_DPC_NIKON_MaximumShots,             PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_INT,                           _put_None },
 
 	/* Newer Nikons have UINT8 ranges */
@@ -8394,7 +9089,7 @@ static struct submenu capture_settings_menu[] = {
 	{ N_("Flash White Balance Bias"),       "flashwhitebias",           PTP_DPC_NIKON_WhiteBalanceFlashBias,    PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_UWBBias,                 _put_Nikon_UWBBias },
 	{ N_("Cloudy White Balance Bias"),      "cloudywhitebias",          PTP_DPC_NIKON_WhiteBalanceCloudyBias,   PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_UWBBias,                 _put_Nikon_UWBBias },
 	{ N_("Shady White Balance Bias"),       "shadewhitebias",           PTP_DPC_NIKON_WhiteBalanceShadeBias,    PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_UWBBias,                 _put_Nikon_UWBBias },
-	{ N_("Natural light auto White Balance Bias"),	"naturallightautowhitebias",	PTP_DPC_NIKON_WhiteBalanceNaturalLightAutoBias,    PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_UWBBias,	_put_Nikon_UWBBias },
+	{ N_("Natural light auto White Balance Bias"),	"naturallightautowhitebias",	PTP_DPC_NIKON_WhiteBalanceNaturalLightAutoBias,    PTP_VENDOR_NIKON,   PTP_DTC_UINT16,  _get_Nikon_UWBBias,	_put_Nikon_UWBBias },
 	/* older Nikons have INT8 ranges */
 	{ N_("Auto White Balance Bias"),        "autowhitebias",            PTP_DPC_NIKON_WhiteBalanceAutoBias,     PTP_VENDOR_NIKON,   PTP_DTC_INT8,   _get_Nikon_WBBias,                  _put_Nikon_WBBias },
 	{ N_("Tungsten White Balance Bias"),    "tungstenwhitebias",        PTP_DPC_NIKON_WhiteBalanceTungstenBias, PTP_VENDOR_NIKON,   PTP_DTC_INT8,   _get_Nikon_WBBias,                  _put_Nikon_WBBias },
@@ -8427,9 +9122,12 @@ static struct submenu capture_settings_menu[] = {
 	{ N_("Manual Movie Setting"),           "manualmoviesetting",       PTP_DPC_NIKON_ManualMovieSetting,       PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_OnOff_UINT8,             _put_Nikon_OnOff_UINT8 },
 	{ N_("Microphone"),                     "microphone",               PTP_DPC_NIKON_MovMicrophone,            PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_Microphone,              _put_Nikon_Microphone },
 	{ N_("Reverse Indicators"),             "reverseindicators",        PTP_DPC_NIKON_IndicatorDisp,            PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_OffOn_UINT8,             _put_Nikon_OffOn_UINT8 },
-	{ N_("Auto Distortion Control"),        "autodistortioncontrol",    PTP_DPC_NIKON_AutoDistortionControl,    PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_OffOn_UINT8,             _put_Nikon_OffOn_UINT8 },
+	{ N_("Auto Distortion Control"),        "autodistortioncontrol",    PTP_DPC_NIKON_AutoDistortionControl,    PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_OnOff_UINT8,             _put_Nikon_OnOff_UINT8 },
+	{ N_("Vignette Correction"),            "vignettecorrection",       PTP_DPC_NIKON_VignetteCtrl,             PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_VignetteCorrection,      _put_Nikon_VignetteCorrection },
 	{ N_("Video Mode"),                     "videomode",                PTP_DPC_NIKON_VideoMode,                PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_VideoMode,               _put_Nikon_VideoMode },
 	{ N_("Sensor Crop"),                    "sensorcrop",               PTP_DPC_SONY_SensorCrop,                PTP_VENDOR_SONY,    PTP_DTC_UINT8,  _get_Sony_SensorCrop,               _put_Sony_SensorCrop },
+	{ N_("HDMI Output Data Depth"),         "hdmioutputdatadepth",      PTP_DPC_NIKON_HDMIOutputDataDepth,      PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_HDMIDataDepth,           _put_Nikon_HDMIDataDepth },
+	{ N_("Face Detection"),                 "facedetection",            PTP_DPC_NIKON_FaceDetection,            PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_FaceDetection,           _put_Nikon_FaceDetection },
 
 	{ 0,0,0,0,0,0,0 },
 };
@@ -8473,7 +9171,7 @@ static struct submenu nikon_d40_capture_settings[] = {
 static struct submenu nikon_d850_capture_settings[] = {
 	{ N_("Image Quality"),          	"imagequality",			PTP_DPC_CompressionSetting,     PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D850_Compression,       _put_Nikon_D850_Compression },
 	{ N_("Image Rotation Flag"),            "imagerotationflag",    PTP_DPC_NIKON_ImageRotation,    PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_OffOn_UINT8,            _put_Nikon_OffOn_UINT8 },
-	{ N_("Active D-Lighting"),              "dlighting",            PTP_DPC_NIKON_ActiveDLighting,  PTP_VENDOR_NIKON,   PTP_DTC_INT8,   _get_Nikon_D850_ActiveDLighting,   _put_Nikon_D850_ActiveDLighting },
+	{ N_("Active D-Lighting"),              "dlighting",            PTP_DPC_NIKON_ActiveDLighting,  PTP_VENDOR_NIKON,   PTP_DTC_UINT8,   _get_Nikon_D850_ActiveDLighting,   _put_Nikon_D850_ActiveDLighting },
 	{ N_("Continuous Shooting Speed Slow"), "shootingspeed",        PTP_DPC_NIKON_D1ShootingSpeed,  PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D850_ShootingSpeed,     _put_Nikon_D850_ShootingSpeed },
 	{ N_("Movie Resolution"),               "moviequality",         PTP_DPC_NIKON_MovScreenSize,    PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D850_MovieQuality,      _put_Nikon_D850_MovieQuality },	
 	{ N_("Center Weight Area"),             "centerweightsize",     PTP_DPC_NIKON_CenterWeightArea, PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D850_CenterWeight,      _put_Nikon_D850_CenterWeight },
@@ -8481,9 +9179,21 @@ static struct submenu nikon_d850_capture_settings[] = {
 	{ 0,0,0,0,0,0,0 },
 };
 
+static struct submenu nikon_d7500_capture_settings[] = {
+	{ N_("Image Quality"), "imagequality", PTP_DPC_CompressionSetting, PTP_VENDOR_NIKON, PTP_DTC_UINT8, _get_Nikon_D7500_Compression, _put_Nikon_D7500_Compression },
+	{ 0,0,0,0,0,0,0 },
+};
+
+/* D500 has the same list as the D850 */
+static struct submenu nikon_d500_capture_settings[] = {
+	{ N_("Image Quality"), "imagequality", PTP_DPC_CompressionSetting, PTP_VENDOR_NIKON, PTP_DTC_UINT8, _get_Nikon_D850_Compression, _put_Nikon_D850_Compression },
+	{ 0,0,0,0,0,0,0 },
+};
+
 static struct submenu nikon_z6_capture_settings[] = {
-	{ N_("Image Quality"),          	"imagequality",		PTP_DPC_CompressionSetting,     PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D850_Compression,       _put_Nikon_D850_Compression },
-	{ N_("Focus Metering Mode"),            "focusmetermode",       PTP_DPC_FocusMeteringMode,	PTP_VENDOR_NIKON,   PTP_DTC_UINT16, _get_Nikon_D850_FocusMetering,     _put_Nikon_D850_FocusMetering },
+	{ N_("Image Quality"),          	"imagequality",		PTP_DPC_CompressionSetting,     PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D850_Compression,	_put_Nikon_D850_Compression },
+	{ N_("Focus Metering Mode"),            "focusmetermode",       PTP_DPC_FocusMeteringMode,	PTP_VENDOR_NIKON,   PTP_DTC_UINT16, _get_Nikon_D850_FocusMetering,	_put_Nikon_D850_FocusMetering },
+	{ N_("Minimum Shutter Speed"),  	"minimumshutterspeed",  PTP_DPC_NIKON_PADVPMode,	PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_Z6_PADVPValue,		_put_Nikon_Z6_PADVPValue },
 	{ 0,0,0,0,0,0,0 },
 };
 
@@ -8501,16 +9211,15 @@ static struct submenu nikon_d7100_capture_settings[] = {
 	{ N_("Exposure Program"),               "expprogram",           PTP_DPC_ExposureProgramMode,    0,                  PTP_DTC_UINT16, _get_NIKON_D7100_ExposureProgram,   _put_NIKON_D7100_ExposureProgram },
 	{ N_("Minimum Shutter Speed"),          "minimumshutterspeed",  PTP_DPC_NIKON_PADVPMode,        PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D7100_PADVPValue,        _put_Nikon_D7100_PADVPValue },
 	{ N_("Continuous Shooting Speed Slow"), "shootingspeed",        PTP_DPC_NIKON_D1ShootingSpeed,  PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D7100_ShootingSpeed,     _put_Nikon_D7100_ShootingSpeed },
-	{ N_("ISO Auto Hi Limit"),              "isoautohilimit",       PTP_DPC_NIKON_ISOAutoHiLimit,   PTP_VENDOR_NIKON,   PTP_DTC_INT8,   _get_Nikon_D7100_ISOAutoHiLimit,    _put_Nikon_D7100_ISOAutoHiLimit },
+	{ N_("ISO Auto Hi Limit"),              "isoautohilimit",       PTP_DPC_NIKON_ISOAutoHiLimit,   PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D7100_ISOAutoHiLimit,    _put_Nikon_D7100_ISOAutoHiLimit },
 	{ N_("Flash Sync. Speed"),              "flashsyncspeed",       PTP_DPC_NIKON_FlashSyncSpeed,   PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D7100_FlashSyncSpeed,    _put_Nikon_D7100_FlashSyncSpeed },
 	{ N_("Focus Metering"),                 "focusmetering",        PTP_DPC_FocusMeteringMode,      PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D7100_FocusMetering,     _put_Nikon_D7100_FocusMetering },
 	{ 0,0,0,0,0,0,0 },
 };
 static struct submenu nikon_d90_capture_settings[] = {
 	{ N_("Minimum Shutter Speed"),          "minimumshutterspeed",  PTP_DPC_NIKON_PADVPMode,        PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D90_PADVPValue,      _put_Nikon_D90_PADVPValue },
-	{ N_("ISO Auto Hi Limit"),              "isoautohilimit",       PTP_DPC_NIKON_ISOAutoHiLimit,   PTP_VENDOR_NIKON,   PTP_DTC_INT8,   _get_Nikon_D90_ISOAutoHiLimit,  _put_Nikon_D90_ISOAutoHiLimit },
-	{ N_("Active D-Lighting"),              "dlighting",            PTP_DPC_NIKON_ActiveDLighting,  PTP_VENDOR_NIKON,   PTP_DTC_INT8,   _get_Nikon_D90_ActiveDLighting, _put_Nikon_D90_ActiveDLighting },
-	{ N_("High ISO Noise Reduction"),       "highisonr",            PTP_DPC_NIKON_NrHighISO,        PTP_VENDOR_NIKON,   PTP_DTC_INT8,   _get_Nikon_D90_HighISONR,       _put_Nikon_D90_HighISONR },
+	{ N_("ISO Auto Hi Limit"),              "isoautohilimit",       PTP_DPC_NIKON_ISOAutoHiLimit,   PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D90_ISOAutoHiLimit,  _put_Nikon_D90_ISOAutoHiLimit },
+	{ N_("Active D-Lighting"),              "dlighting",            PTP_DPC_NIKON_ActiveDLighting,  PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D90_ActiveDLighting, _put_Nikon_D90_ActiveDLighting },
 	{ N_("Image Quality"),                  "imagequality",         PTP_DPC_CompressionSetting,     PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D90_Compression,     _put_Nikon_D90_Compression },
 	{ N_("Continuous Shooting Speed Slow"), "shootingspeed",        PTP_DPC_NIKON_D1ShootingSpeed,  PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D90_ShootingSpeed,   _put_Nikon_D90_ShootingSpeed },
 	{ 0,0,0,0,0,0,0 },
@@ -8519,7 +9228,7 @@ static struct submenu nikon_d90_capture_settings[] = {
 /* One D3s reporter is Matthias Blaicher */
 static struct submenu nikon_d3s_capture_settings[] = {
 	{ N_("Minimum Shutter Speed"),          "minimumshutterspeed",      PTP_DPC_NIKON_PADVPMode,                PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D3s_PADVPValue,              _put_Nikon_D3s_PADVPValue },
-	{ N_("ISO Auto Hi Limit"),              "isoautohilimit",           PTP_DPC_NIKON_ISOAutoHiLimit,           PTP_VENDOR_NIKON,   PTP_DTC_INT8,   _get_Nikon_D3s_ISOAutoHiLimit,          _put_Nikon_D3s_ISOAutoHiLimit },
+	{ N_("ISO Auto Hi Limit"),              "isoautohilimit",           PTP_DPC_NIKON_ISOAutoHiLimit,           PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D3s_ISOAutoHiLimit,          _put_Nikon_D3s_ISOAutoHiLimit },
 	{ N_("Continuous Shooting Speed Slow"), "shootingspeed",            PTP_DPC_NIKON_D1ShootingSpeed,          PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D3s_ShootingSpeed,           _put_Nikon_D3s_ShootingSpeed },
 	{ N_("Continuous Shooting Speed High"), "shootingspeedhigh",        PTP_DPC_NIKON_ContinuousSpeedHigh,      PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D3s_ShootingSpeedHigh,       _put_Nikon_D3s_ShootingSpeedHigh },
 	{ N_("Flash Sync. Speed"),              "flashsyncspeed",           PTP_DPC_NIKON_FlashSyncSpeed,           PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D3s_FlashSyncSpeed,          _put_Nikon_D3s_FlashSyncSpeed },
@@ -8535,8 +9244,7 @@ static struct submenu nikon_d3s_capture_settings[] = {
 	{ N_("AF On Button"),                   "afonbutton",               PTP_DPC_NIKON_NormalAFOn,               PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D3s_NormalAFOn,              _put_Nikon_D3s_NormalAFOn },
 
 	/* same as D90 */
-	{ N_("High ISO Noise Reduction"),       "highisonr",                PTP_DPC_NIKON_NrHighISO,                PTP_VENDOR_NIKON,   PTP_DTC_INT8,   _get_Nikon_D90_HighISONR,               _put_Nikon_D90_HighISONR },
-	{ N_("Active D-Lighting"),              "dlighting",                PTP_DPC_NIKON_ActiveDLighting,          PTP_VENDOR_NIKON,   PTP_DTC_INT8,   _get_Nikon_D90_ActiveDLighting,         _put_Nikon_D90_ActiveDLighting },
+	{ N_("Active D-Lighting"),              "dlighting",                PTP_DPC_NIKON_ActiveDLighting,          PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D90_ActiveDLighting,         _put_Nikon_D90_ActiveDLighting },
 
 	{ 0,0,0,0,0,0,0 },
 };
@@ -8544,10 +9252,10 @@ static struct submenu nikon_d3s_capture_settings[] = {
 static struct submenu nikon_generic_capture_settings[] = {
 	/* filled in with D90 values */
 	{ N_("Minimum Shutter Speed"),          "minimumshutterspeed",      PTP_DPC_NIKON_PADVPMode,                PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D90_PADVPValue,          _put_Nikon_D90_PADVPValue },
-	{ N_("ISO Auto Hi Limit"),              "isoautohilimit",           PTP_DPC_NIKON_ISOAutoHiLimit,           PTP_VENDOR_NIKON,   PTP_DTC_INT8,   _get_Nikon_D90_ISOAutoHiLimit,      _put_Nikon_D90_ISOAutoHiLimit },
-	{ N_("Active D-Lighting"),              "dlighting",                PTP_DPC_NIKON_ActiveDLighting,          PTP_VENDOR_NIKON,   PTP_DTC_INT8,   _get_Nikon_D90_ActiveDLighting,     _put_Nikon_D90_ActiveDLighting },
-	{ N_("High ISO Noise Reduction"),       "highisonr",                PTP_DPC_NIKON_NrHighISO,                PTP_VENDOR_NIKON,   PTP_DTC_INT8,   _get_Nikon_D90_HighISONR,           _put_Nikon_D90_HighISONR },
-	{ N_("Movie High ISO Noise Reduction"), "moviehighisonr",           PTP_DPC_NIKON_MovieNrHighISO,           PTP_VENDOR_NIKON,   PTP_DTC_INT8,   _get_Nikon_D90_HighISONR,           _put_Nikon_D90_HighISONR },
+	{ N_("ISO Auto Hi Limit"),              "isoautohilimit",           PTP_DPC_NIKON_ISOAutoHiLimit,           PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D90_ISOAutoHiLimit,      _put_Nikon_D90_ISOAutoHiLimit },
+	{ N_("Active D-Lighting"),              "dlighting",                PTP_DPC_NIKON_ActiveDLighting,          PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D90_ActiveDLighting,     _put_Nikon_D90_ActiveDLighting },
+	{ N_("High ISO Noise Reduction"),       "highisonr",                PTP_DPC_NIKON_NrHighISO,                PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D90_HighISONR,           _put_Nikon_D90_HighISONR },
+	{ N_("Movie High ISO Noise Reduction"), "moviehighisonr",           PTP_DPC_NIKON_MovieNrHighISO,           PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D90_HighISONR,           _put_Nikon_D90_HighISONR },
 	{ N_("Continuous Shooting Speed Slow"), "shootingspeed",            PTP_DPC_NIKON_D1ShootingSpeed,          PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_D90_ShootingSpeed,       _put_Nikon_D90_ShootingSpeed },
 	{ N_("Maximum continuous release"),     "maximumcontinousrelease",  PTP_DPC_NIKON_D2MaximumShots,           PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Range_UINT8,                   _put_Range_UINT8 },
 	{ N_("Movie Quality"),                  "moviequality",             PTP_DPC_NIKON_MovScreenSize,            PTP_VENDOR_NIKON,   PTP_DTC_UINT8,  _get_Nikon_MovieQuality,            _put_Nikon_MovieQuality },
@@ -8582,11 +9290,13 @@ static struct menu menus[] = {
 
 
 	{ N_("Capture Settings"),           "capturesettings",  0x4b0,  0x0421, nikon_d90_capture_settings,     NULL,   NULL },
+	{ N_("Capture Settings"),           "capturesettings",  0x4b0,  0x043c, nikon_d500_capture_settings,    NULL,   NULL },
 	{ N_("Capture Settings"),           "capturesettings",  0x4b0,  0x0426, nikon_d3s_capture_settings,     NULL,   NULL },
 	{ N_("Capture Settings"),           "capturesettings",  0x4b0,  0x0429, nikon_d5100_capture_settings,   NULL,   NULL },
 	{ N_("Capture Settings"),           "capturesettings",  0x4b0,  0x0430, nikon_d7100_capture_settings,   NULL,   NULL },
+	{ N_("Capture Settings"),           "capturesettings",  0x4b0,  0x0440, nikon_d7500_capture_settings,   NULL,   NULL },
 	{ N_("Capture Settings"),           "capturesettings",  0x4b0,  0x0414, nikon_d40_capture_settings,     NULL,   NULL },
-	{ N_("Capture Settings"),           "capturesettings",  0x4b0,  0x0441, nikon_d850_capture_settings,    NULL,   NULL },
+	{ N_("Capture Settings"),           "capturesettings",  0x4b0,  0x0441, nikon_d850_capture_settings,    NULL,   NULL },	
 	{ N_("Capture Settings"),           "capturesettings",  0x4b0,  0x0442, nikon_z6_capture_settings,      NULL,   NULL },	/* Z7 */
 	{ N_("Capture Settings"),           "capturesettings",  0x4b0,  0x0443, nikon_z6_capture_settings,      NULL,   NULL }, /* Z6 */
 	{ N_("Capture Settings"),           "capturesettings",  0x4b0,  0,      nikon_generic_capture_settings, NULL,   NULL },

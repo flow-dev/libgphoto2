@@ -97,7 +97,8 @@ spca50x_sdram_get_fat_page (CameraPrivateLibrary * lib, int index,
 					 SPCA50X_FAT_PAGE_SIZE, p));
 			break;
 		default:
-			break;
+			gp_log(GP_LOG_ERROR, "spca50x", "spca50x_sdram_get_fat_page: dramtype %d unhandled", dramtype);
+			return GP_ERROR;
 	}
 
 	return GP_OK;
@@ -226,6 +227,7 @@ spca50x_get_image (CameraPrivateLibrary * lib, uint8_t ** buf,
 	int omit_escape = 0;
 
 	p = g_file->fat;
+	if (!p) return GP_ERROR;
 
 	/* get the position in memory where the image is */
 	start = (p[1] & 0xff) + (p[2] & 0xff) * 0x100;
@@ -443,6 +445,11 @@ spca50x_get_avi (CameraPrivateLibrary * lib, uint8_t ** buf,
 			start_of_frame = avi;
 
 			/* jpeg starts here */
+			if ((data - mybuf) + frame_size > size) {
+				free (mybuf);
+				GP_DEBUG("BAD: accessing more than we read (%d vs total %d)", (data-mybuf)+frame_size , size);
+				return GP_ERROR_CORRUPTED_DATA;
+			}
 			create_jpeg_from_data (avi, data, qIndex, frame_width,
 					       frame_height, 0x22, frame_size,
 					       &length, 1, 0);
@@ -718,7 +725,7 @@ spca50x_sdram_get_info (CameraPrivateLibrary * lib)
 	if (lib->num_files_on_sdram > 0) {
 		CHECK (spca50x_get_FATs (lib, dramtype));
 
-		index = lib->files[lib->num_files_on_sdram - 1].fat_end;
+		index = lib->sdram_files[lib->num_files_on_sdram - 1].fat_end;
 		if (index >= lib->num_fats) {
 			gp_log(GP_LOG_ERROR, "spca50x", "%d exceeds num_fats %d", index, lib->num_fats);
 			return GP_ERROR;
@@ -749,7 +756,7 @@ spca50x_sdram_get_file_info (CameraPrivateLibrary * lib, unsigned int index,
 {
 	if (lib->dirty_sdram)
 		CHECK (spca50x_sdram_get_info (lib));
-	*g_file = &(lib->files[index]);
+	*g_file = &(lib->sdram_files[index]);
 	return GP_OK;
 }
 static int
@@ -862,13 +869,13 @@ spca50x_get_FATs (CameraPrivateLibrary * lib, int dramtype)
 		lib->fats = NULL;
 	}
 
-	if (lib->files) {
-		free (lib->files);
-		lib->files = NULL;
+	if (lib->sdram_files) {
+		free (lib->sdram_files);
+		lib->sdram_files = NULL;
 	}
 
-	lib->fats = malloc (lib->num_fats * SPCA50X_FAT_PAGE_SIZE);
-	lib->files = malloc (lib->num_files_on_sdram * sizeof (struct SPCA50xFile));
+	lib->fats = calloc (lib->num_fats , SPCA50X_FAT_PAGE_SIZE);
+	lib->sdram_files = calloc (lib->num_files_on_sdram , sizeof (struct SPCA50xFile));
 
 	p = lib->fats;
 	if (lib->bridge == BRIDGE_SPCA504) {
@@ -900,7 +907,7 @@ spca50x_get_FATs (CameraPrivateLibrary * lib, int dramtype)
 	while (index < lib->num_fats) {
 		if (file_index >= lib->num_files_on_sdram) {
 			free (lib->fats); lib->fats = NULL;
-			free (lib->files); lib->files = NULL;
+			free (lib->sdram_files); lib->sdram_files = NULL;
 			return GP_ERROR;
 		}
 
@@ -912,29 +919,32 @@ spca50x_get_FATs (CameraPrivateLibrary * lib, int dramtype)
 			/* continuation of an avi */
 			if (!file_index)
 				return GP_ERROR;
-			lib->files[file_index - 1].fat_end = index;
+			lib->sdram_files[file_index - 1].fat_end = index;
 		} else {
 			/* its an image */
 			if (type == 0x00 || type == 0x01) {
 				snprintf (buf, sizeof(buf), "Image%03d.jpg",
 					  ++lib->num_images);
-				lib->files[file_index].mime_type =
+				lib->sdram_files[file_index].mime_type =
 					SPCA50X_FILE_TYPE_IMAGE;
 			} else if ((type == 0x08) || (type == 0x03)) {
 				/* its the start of an avi */
 				snprintf (buf, sizeof(buf), "Movie%03d.avi",
 					  ++lib->num_movies);
-				lib->files[file_index].mime_type =
+				lib->sdram_files[file_index].mime_type =
 					SPCA50X_FILE_TYPE_AVI;
+			} else {
+				gp_log(GP_LOG_ERROR, "spca50x", "type %d unhandled - error", type);
+				return GP_ERROR;
 			}
-			lib->files[file_index].fat = p;
-			lib->files[file_index].fat_start = index;
-			lib->files[file_index].fat_end = index;
-			lib->files[file_index].name = strdup ((char*)buf);
+			lib->sdram_files[file_index].fat = p;
+			lib->sdram_files[file_index].fat_start = index;
+			lib->sdram_files[file_index].fat_end = index;
+			lib->sdram_files[file_index].name = strdup ((char*)buf);
 			if (lib->bridge == BRIDGE_SPCA504) {
-				lib->files[file_index].width =
+				lib->sdram_files[file_index].width =
 					(p[8] & 0xFF) * 16;
-				lib->files[file_index].height =
+				lib->sdram_files[file_index].height =
 					(p[9] & 0xFF) * 16;
 			} else if (lib->bridge == BRIDGE_SPCA500) {
 				int w, h;
@@ -946,10 +956,10 @@ spca50x_get_FATs (CameraPrivateLibrary * lib, int dramtype)
 					w = 640;
 					h = 480;
 				}
-				lib->files[file_index].width = w;
-				lib->files[file_index].height = h;
+				lib->sdram_files[file_index].width = w;
+				lib->sdram_files[file_index].height = h;
 			}
-			lib->files[file_index].thumb = NULL;
+			lib->sdram_files[file_index].thumb = NULL;
 			file_index++;
 		}
 		p += SPCA50X_FAT_PAGE_SIZE;

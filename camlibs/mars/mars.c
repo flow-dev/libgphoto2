@@ -274,7 +274,8 @@ int mars_decompress (unsigned char *inp, unsigned char *outp, int width,
     				val = table[code].val;
     				lp =  outp[-2];
     				if (row > 1) {
-        				tlp = outp[-2*width-2];
+					if (col > 1)
+						tlp = outp[-2*width-2];
         				tp  = outp[-2*width];
         				if (col < width-2)
         					trp = outp[-2*width+2];
