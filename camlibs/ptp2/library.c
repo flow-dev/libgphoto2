@@ -1161,6 +1161,7 @@ static struct {
 
 	/* Andre Crone <andre@elysia.nl>, adjusted */
 	{"Sony:Alpha-A7S II (Control)",		0x054c,0x0a71, PTP_CAP|PTP_CAP_PREVIEW},
+	{"Sony:Alpha-A7S II (ADD Control)",		0x054c,0x0d18, PTP_CAP|PTP_CAP_PREVIEW},
 
 	/* brandonlampert@gmail.com */
 	{"Sony:DSC-QX30U",			0x054c,0x0a77, PTP_CAP_PREVIEW},
