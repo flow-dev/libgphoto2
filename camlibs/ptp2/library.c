@@ -2811,8 +2811,8 @@ camera_abilities (CameraAbilitiesList *list)
 	}
 
 	memset(&a, 0, sizeof(a));
-	//strcpy(a.model, "USB PTP Class Camera");
-	strcpy(a.model, "USB PTP Class Camera de");
+	strcpy(a.model, "USB PTP Class Camera");
+	//strcpy(a.model, "USB PTP Class Camera de");
 	a.status = GP_DRIVER_STATUS_TESTING;
 	a.port   = GP_PORT_USB;
 	a.speed[0] = 0;
